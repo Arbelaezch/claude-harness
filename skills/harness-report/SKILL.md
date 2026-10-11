@@ -11,7 +11,9 @@ Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/harness.py --root ${CLAUDE_PROJECT_DI
 
 Show both outputs to the user as-is (they're tables), then add at most four short observations, for example:
 - the most expensive stage and whether a cheaper model is worth trying there
-  (`harness models set <agent> <model>`),
+  (`harness models set <agent> <model> [--effort low|medium|high]`; lowering effort is the cheaper
+  first lever),
+- agents showing zero or unpriced cost (the model ID has no entry under `[pricing]` in defaults.toml),
 - reviewer precision below ~50% (too many false positives) or many "missed" issues
   (reviewer too weak), and whether to try another provider in .claude/harness.toml,
 - a low engineer first-attempt gate pass rate (plans too vague, or engineer model too weak),

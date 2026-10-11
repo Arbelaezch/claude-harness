@@ -1709,6 +1709,8 @@ def cmd_verdict(a, cfg):
         stats["verifier_added"] += 1
     fix_sev = set(lcfg.get("fix_severities", ["blocking", "should_fix"]))
     to_fix = [f for f in final if f["verdict"] == "confirmed" and f["severity"] in fix_sev]
+    # An uncertain blocking finding can't be sent to the engineer (unproven), so a human has to judge it.
+    uncertain_blocking = [f for f in final if f["verdict"] == "uncertain" and f["severity"] == "blocking"]
     max_rounds = lcfg.get("quick_max_review_rounds", 1) if run.get("mode") == "quick" else lcfg.get("max_review_rounds", 3)
     write_json(d / f"final-{a.round}.json", {"round": a.round, "findings": final})
     judged_n = stats["confirmed"] + stats["rejected"] + stats["uncertain"]
@@ -1719,9 +1721,9 @@ def cmd_verdict(a, cfg):
                "confirmed_by_severity": {s: sum(1 for f in final if f["verdict"] == "confirmed" and f["severity"] == s) for s in SEVERITIES}})
     if run.get("mode") == "review":
         decision = "DRAFT"
-    elif not to_fix:
+    elif not to_fix and not uncertain_blocking:
         decision = "DONE"
-    elif a.round >= max_rounds:
+    elif not to_fix or a.round >= max_rounds:
         decision = "ESCALATE"
     else:
         decision = "FIX"
@@ -1733,7 +1735,12 @@ def cmd_verdict(a, cfg):
     if decision == "FIX":
         print(f"Send the engineer: {d}/fix-{a.round}.json ({len(to_fix)} findings)")
     elif decision == "ESCALATE":
-        print(f"{len(to_fix)} confirmed findings still open after {a.round} rounds: {d}/final-{a.round}.json")
+        print(f"{len(to_fix)} confirmed and {len(uncertain_blocking)} uncertain-blocking findings still open "
+              f"after {a.round} round(s): {d}/final-{a.round}.json")
+    if uncertain_blocking and decision != "DRAFT":
+        print(f"UNCERTAIN BLOCKING ({len(uncertain_blocking)}): the verifier could not confirm or rule these out:")
+        for f in uncertain_blocking:
+            print(f"  - {f['id']} {f.get('file', '')}:{f.get('line', '')} {f.get('title', '')}")
     elif decision == "DRAFT":
         print("Next: harness pr draft")
 

@@ -91,6 +91,10 @@ parallel): spawn a `harness:engineer` with the task id, passing `model: opus` wh
 - If it reports GATES FAIL after its retries: resume it once with SendMessage asking it to try a
   different approach. If it still fails, ask the user whether to continue, skip the task, or abort.
 - If it reports the plan is wrong, resume the planner with the engineer's reason, then continue.
+- If it reports `NEEDS USER: ...`, relay what and why to the user, ask how to proceed, and stop that
+  task until they answer.
+- Engineers run at the effort set in their agent file (fix rounds included); the `model: opus`
+  override only changes the model.
 
 After all tasks: run `H gates` (all changed repos). If anything fails, send the failing output's log
 path to an engineer to fix, then rerun.
@@ -102,7 +106,9 @@ For round n = 1, 2, ...:
 3. `H verdict --round n` prints `DECISION: DONE | FIX | ESCALATE`.
    - DONE: go to step 8.
    - FIX: spawn a `harness:engineer` with `<run_dir>/fix-<n>.json`. Then `H gates`; continue with round n+1.
-   - ESCALATE: tell the user how many confirmed findings remain and where (`final-<n>.json`), and ask:
+   - ESCALATE: tell the user how many confirmed and uncertain-blocking findings remain and where
+     (`final-<n>.json`). Uncertain-blocking ones are unproven, so the engineer can't fix them; the
+     verifier's reason says what would settle each. Ask:
      "Run another round", "Stop here; I'll handle the rest". Respect the answer.
 
 ## 8. Finish
