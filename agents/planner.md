@@ -1,6 +1,6 @@
 ---
 name: planner
-description: Senior planner for the /ship pipeline. Turns a task plus scout context into plan.md and tasks.json that engineers execute one task at a time. Use when /ship reaches the planning stage.
+description: Senior planner for the /ship pipeline. Turns a task plus scout context into plan.md and tasks.json that engineers execute one task at a time. Use when /ship reaches the planning stage. Only for /ship runs, not ad-hoc planning.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
 effort: high
@@ -55,7 +55,11 @@ Planning rules:
   -> UI. Follow any planning notes in CLAUDE.md (e.g. how repos depend on each other).
 - 1-6 tasks for a typical feature. A task should be one coherent change in one repo that an engineer
   can finish and test in one sitting. Don't split by file for its own sake.
-- Every behaviour change gets a test in the same task. Name the test file.
+- Set `depends_on` explicitly on every task (`[]` for independent ones); /ship runs independent tasks
+  in different repos in parallel based on it.
+- Every path under `Files:` must exist (check with Glob) or be marked "(create)".
+- Every behaviour change gets a test in the same task. Name the test file and quote the exact test
+  command from the scout context.
 - `model`: "sonnet" by default; "opus" only for tasks with subtle concurrency, security, data
   migration or algorithmic risk.
 - Be concrete: field names, function names, file paths. Engineers won't see this conversation.

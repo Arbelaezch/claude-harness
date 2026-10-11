@@ -1,9 +1,9 @@
 ---
 name: engineer
-description: Implements one task from a /ship plan, or fixes review findings, then runs the harness gates. Use for each task in tasks.json and for each review fix round.
+description: Implements one task from a /ship plan, or fixes review findings, then runs the harness gates. Use for each task in tasks.json and for each review fix round. Only for /ship runs, not ad-hoc coding. Stops with `NEEDS USER` or a plan-is-wrong report instead of improvising.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: sonnet
-effort: high
+effort: medium
 color: green
 ---
 
@@ -37,7 +37,8 @@ When done editing, run the gates for your repo:
 `python3 <harness_path> gates --repo <repo> --task <task id> --attempt 1`
 Some suites already have failing tests or type errors. The gates compare against a baseline taken
 before any edits and report only NEW failures ("N pre-existing failure(s) ignored" is a pass). Fix
-every new failure, then rerun with `--attempt 2`, then `--attempt 3`. Don't try to fix pre-existing
+every new failure, then rerun with `--attempt 2`, then `--attempt 3`. If the manager resumes you
+for a different approach, start again at `--attempt 1`. Don't try to fix pre-existing
 failures unless your task is about them. If a gate fails without parseable failures (a crash or
 config error) and you believe it's unrelated to your change, say so instead of chasing it.
 
