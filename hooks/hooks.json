@@ -1,0 +1,28 @@
+{
+  "description": "Harness: git/GitHub guard, per-agent metrics, account check. Each hook does nothing in projects without .claude/harness.toml.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/harness.py", "hook", "guard-bash"], "timeout": 15 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/harness.py", "hook", "subagent-stop"], "async": true, "timeout": 60 }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          { "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/harness.py", "hook", "session-start"], "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

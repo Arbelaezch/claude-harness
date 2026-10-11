@@ -1,0 +1,6 @@
+{
+  "name": "harness",
+  "displayName": "Harness",
+  "description": "Multi-agent delivery pipeline: /ship (plan, implement, cross-lab review), /review-pr (linked PRs, pending GitHub reviews), /harness-init and /harness-report.",
+  "author": { "name": "Christian Arbelaez" }
+}

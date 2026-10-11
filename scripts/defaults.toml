@@ -1,0 +1,137 @@
+# Harness plugin defaults, shared by every project.
+# Each project's .claude/harness.toml overrides any of these (and defines [project], [repos.*],
+# [accounts] and optional [models]). Edit here for changes that should apply everywhere.
+
+# ---------------------------------------------------------------------------
+# Claude accounts. A project picks one with `[accounts] claude = "<name>"`; the claude shell function
+# (scripts/claude-accounts.sh) then starts Claude Code with that account's config directory.
+# "" means the default ~/.claude. Each directory keeps its own login (incl. macOS Keychain entry).
+# ---------------------------------------------------------------------------
+[accounts.dirs]
+work = ""
+personal = "~/.claude-personal"
+
+# `kind` on a gate (jest | django | pytest | tsc | eslint) makes it baseline-aware: `harness baseline`
+# records failures that exist before any edits, and the gate then fails only on NEW failures.
+
+[gates]
+timeout_seconds = 900
+# Auto-detected lint gates are off by default: repos with pre-existing lint errors
+# would fail every run. Turn on once your lint baseline is clean.
+autodetect_lint = false
+# Lines of failing output shown to the agent (full logs are saved in the run dir).
+failure_tail_lines = 60
+
+# ---------------------------------------------------------------------------
+# Git policy. Enforced by a PreToolUse hook on every Bash call, for the manager
+# and every subagent.
+#   "uncommitted" - agents edit files on a feature branch; no staging, no commits.
+#   "commit"      - agents may `git add` / `git commit` on the feature branch
+#                   (one commit per task). Commits to protected branches are blocked.
+# `git push`, `git pull`, history rewrites and GitHub write commands (PRs, comments, reviews) are
+# always blocked for agents. Pending PR reviews are created only by `harness pr post`.
+# ---------------------------------------------------------------------------
+[git]
+mode = "uncommitted"
+# Every run fetches origin and starts its branch from origin/<base_branch> (override per project or per
+# repo with base_branch = "..."). Your local branches are never modified.
+base_branch = "main"
+# Your team's naming: e.g. feat/193-community-and-its-admins-lifecycle
+branch_template = "{type}/{issue}-{slug}"
+branch_template_no_issue = "{type}/{slug}"
+protected_branches = ["main", "master", "dev", "develop", "staging", "production"]
+
+# ---------------------------------------------------------------------------
+# Review loop.
+# ---------------------------------------------------------------------------
+[loop]
+max_review_rounds = 3          # after this many rounds with open issues -> escalate to you
+max_gate_retries = 2           # engineer retries when gates fail before escalating
+fix_severities = ["blocking", "should_fix"]   # confirmed findings sent back to the engineer
+quick_max_review_rounds = 1    # used by `/ship --quick`
+
+# ---------------------------------------------------------------------------
+# Cross-lab reviewer (Reviewer 1). Swap providers by changing `provider`, or per
+# run with `harness review --provider glm`. Set provider = "claude" to skip the
+# outside model and use the claude-reviewer subagent instead.
+# Any OpenAI-compatible chat-completions API works: add a [providers.<name>] block.
+# ---------------------------------------------------------------------------
+[reviewer]
+provider = "deepseek"
+max_diff_chars = 300000        # diffs beyond this are truncated (with a notice to the model)
+max_findings = 15
+request_timeout_seconds = 600
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-pro"      # cheaper: "deepseek-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+json_mode = true
+max_tokens = 16000
+extra_body = { thinking = { type = "enabled" }, reasoning_effort = "high" }
+# USD per 1M tokens at PEAK rates. DeepSeek charges half outside peak hours.
+# deepseek-flash peak: input 0.30 / cached 0.006 / output 1.20
+price_input = 1.32
+price_cached_input = 0.044
+price_output = 3.96
+peak_windows_utc = ["01:00-04:00", "06:00-10:00"]
+peak_weekdays_only = true
+offpeak_multiplier = 0.5
+
+[providers.glm]
+# Z.ai. Check the model ID and base URL in your Z.ai console before using.
+base_url = "https://api.z.ai/api/paas/v4"
+model = "glm-5.3"              # cheaper: "glm-5.3-flash" (0.15 / 0.03 / 0.50)
+api_key_env = "ZAI_API_KEY"
+json_mode = true
+max_tokens = 16000
+price_input = 1.40
+price_cached_input = 0.26
+price_output = 4.40
+
+[providers.openrouter]
+# One key, many labs: set model to e.g. "deepseek/deepseek-v4-pro" or "z-ai/glm-5.3".
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-v4-pro"
+api_key_env = "OPENROUTER_API_KEY"
+json_mode = true
+max_tokens = 16000
+price_input = 1.32
+price_cached_input = 0.044
+price_output = 3.96
+
+# ---------------------------------------------------------------------------
+# Metrics. Claude usage on a Team seat is not billed per token, so the ledger
+# reports an "API-equivalent" estimate for Claude (useful for comparing agents
+# and models) and real spend for outside providers.
+# Prices: USD per 1M tokens. Keys are model-ID prefixes; the longest match wins.
+# Verify against https://platform.claude.com/docs/en/about-claude/pricing
+# ---------------------------------------------------------------------------
+[metrics]
+anthropic_billing = "seat"     # "seat" (Team/Max plan) or "api" (pay-per-token key)
+
+[pricing."claude-opus-5-5"]
+input = 4.00
+output = 20.00
+cache_read = 0.40
+cache_write_5m = 5.00
+cache_write_1h = 8.00
+
+[pricing."claude-sonnet-5-5"]
+input = 2.00
+output = 10.00
+cache_read = 0.10
+cache_write_5m = 2.50
+cache_write_1h = 4.00
+
+[pricing."claude-haiku-5-5"]
+input = 0.10
+output = 0.50
+cache_read = 0.01
+cache_write_5m = 0.125
+cache_write_1h = 0.20
+# Haiku 5.5 is priced higher for prompts over 100K tokens.
+long_context_threshold = 100000
+long_input = 0.50
+long_output = 2.50
+long_cache_read = 0.05

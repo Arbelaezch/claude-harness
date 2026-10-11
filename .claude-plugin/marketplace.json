@@ -1,0 +1,8 @@
+{
+  "name": "personal-harness",
+  "description": "A multi-agent delivery pipeline plugin for Claude Code.",
+  "owner": { "name": "Christian Arbelaez" },
+  "plugins": [
+    { "name": "harness", "source": "./", "description": "Delivery pipeline, PR reviews and metrics for any project." }
+  ]
+}
