@@ -73,6 +73,8 @@ which keeps its context small over long runs.
   real codebases whose test suites aren't green.
 - **Git guard hook.** A `PreToolUse` hook parses every shell command from the manager and all subagents.
   It blocks `push`, `pull`, history rewrites, commits to protected branches and GitHub write commands.
+  `gh pr create`, `gh pr merge` and `gh issue create` are the exception: allowed only when gh is logged in as an account in
+  `[github] write_accounts` (default `Arbelaezch`) and the project isn't pinned to another account.
   It supports an `uncommitted` mode and a `commit` mode per project.
 - **Pluggable outside reviewer.** Any OpenAI-compatible chat API works (DeepSeek, Z.ai GLM, OpenRouter).
   Cost tracking includes peak/off-peak pricing windows.
@@ -147,6 +149,7 @@ whatever account they're signed into, and the session-start hook warns if that d
 - `[project]`: `name`, `description`, `review_focus` (checks that reviewers make on every review).
 - `[accounts]`: `claude` (account name), `github` (gh user; the token comes from `gh auth token --user`),
   `git_email` (doctor warns when a repo commits as someone else).
+- `[github]`: `write_accounts`, the gh logins allowed to create/merge PRs and create issues (default `["Arbelaezch"]`; any other, e.g. a work login, is always denied).
 - `[git]`: `base_branch`, `mode = "uncommitted" | "commit"`. Push is always blocked.
 - `[repos.<name>]`: `path`, `description`, `gates = [{ name, kind, cmd, cwd }]`, where `kind` is
   jest, pytest, django, tsc or eslint.
