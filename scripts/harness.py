@@ -785,7 +785,6 @@ def hook_subagent_stop(cfg):
 
 GIT_GLOBAL_OPTS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 ALWAYS_BLOCKED = {
-    "push": "Pushing is always done by you, never by the harness.",
     "pull": "The harness fetches origin itself at branch time; pulling mid-run would move the code under the agents.",
     "rebase": "Rewriting history is not allowed.",
     "filter-branch": "Rewriting history is not allowed.",
@@ -850,18 +849,18 @@ GH_ACCOUNT_GATED = {("pr", "create"), ("pr", "merge"), ("issue", "create")}
 
 
 def github_create_denial(command: str, cfg: dict, what: str) -> str | None:
-    """`gh pr create|merge` / `gh issue create` are allowed only as an account listed in [github].write_accounts
-    (default: personal only). Fails closed: unknown identity, token overrides and a project pinned to
-    another account all deny."""
+    """`git push`, `gh pr create|merge` and `gh issue create` are allowed only as an account listed in
+    [github].write_accounts (default: personal only). Fails closed: unknown identity, token overrides and a
+    project pinned to another account all deny."""
     allowed = {u.lower() for u in ((cfg.get("github") or {}).get("write_accounts") or [])}
     if not allowed:
-        return f"`{what}` is blocked: no GitHub account is allowed to create/merge PRs or create issues ([github].write_accounts)."
+        return f"`{what}` is blocked: no GitHub account is allowed to push, create/merge PRs or create issues ([github].write_accounts)."
     if re.search(r"\b(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GH_HOST|GH_CONFIG_DIR)\b", command):
         return f"`{what}` is blocked: don't override the GitHub token or host; it must run as your active gh account."
     pinned = ((cfg.get("accounts") or {}).get("github") or "").strip()
     if pinned and pinned.lower() not in allowed:
         return (f"`{what}` is blocked: this project uses GitHub account '{pinned}', which isn't allowed to "
-                f"create or merge PRs or create issues. Do it yourself.")
+                f"push, create or merge PRs or create issues. Do it yourself.")
     try:
         r = subprocess.run([GH, "api", "user", "--jq", ".login"], capture_output=True, text=True,
                            timeout=10, env=NET_ENV)
@@ -871,12 +870,36 @@ def github_create_denial(command: str, cfg: dict, what: str) -> str | None:
     if not active:
         return f"`{what}` is blocked: couldn't confirm which GitHub account gh is using."
     if active.lower() not in allowed:
-        return (f"`{what}` is blocked: gh is logged in as '{active}', which isn't allowed to create or merge PRs or "
-                f"create issues. Only: {', '.join(sorted(allowed))}.")
+        return (f"`{what}` is blocked: gh is logged in as '{active}', which isn't allowed to push, create or merge PRs "
+                f"or create issues. Only: {', '.join(sorted(allowed))}.")
     return None
 
 
-def check_bash(command: str, cfg: dict, cwd: str | None = None) -> str | None:
+def push_denial(command: str, args: list[str], cfg: dict, target: str | None) -> str | None:
+    """`git push` runs only as a [github].write_accounts account, and never as a force push, a branch/tag
+    deletion, a mirror push or a push to a protected branch."""
+    protected = set((cfg.get("git") or {}).get("protected_branches", []))
+    positional = [a for a in args if not a.startswith("-")]
+    for a in args:
+        if a in ("--force", "--mirror", "--delete", "--prune") or a.startswith("--force-with-lease") or \
+                a == "--force-if-includes" or (not a.startswith("--") and a.startswith("-") and set(a[1:]) & {"f", "d"}):
+            return f"`git push {a}` is blocked: force pushes, deletions and mirror pushes aren't allowed."
+    refspecs = positional[1:]  # first positional is the remote
+    if not refspecs:
+        br = current_branch(target)
+        refspecs = [br] if br else []
+    for ref in refspecs:
+        if ref.startswith("+"):
+            return "Force pushes (`+refspec`) are blocked."
+        if ref.startswith(":"):
+            return "Deleting remote branches via `git push` is blocked."
+        dst = ref.split(":", 1)[-1].removeprefix("refs/heads/")
+        if dst in protected or dst == "HEAD" and current_branch(target) in protected:
+            return f"Refusing to push to protected branch '{dst}'."
+    return github_create_denial(command, cfg, "git push")
+
+
+def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False) -> str | None:
     """Return a denial reason, or None when the command is allowed."""
     gcfg = cfg.get("git") or {}
     mode = gcfg.get("mode", "uncommitted")
@@ -917,6 +940,13 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None) -> str | None:
         target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
         if sub == "remote" and args and args[0] in ("add", "remove", "rm", "rename", "set-url", "set-head"):
             return "Changing git remotes is blocked."
+        if sub == "push":
+            if subagent:
+                return "`git push` is blocked for subagents. Pushing is done by the main session or by you."
+            denial = push_denial(command, args, cfg, target)
+            if denial:
+                return denial
+            continue
         if sub in ALWAYS_BLOCKED and ALWAYS_BLOCKED[sub]:
             return f"`git {sub}` is blocked by the harness. {ALWAYS_BLOCKED[sub]}"
         if sub == "reset" and ("--hard" in args or "--merge" in args or "--keep" in args):
@@ -948,10 +978,20 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None) -> str | None:
     return None
 
 
-def check_github_global(command: str, cfg: dict) -> str | None:
+def check_github_global(command: str, cfg: dict, cwd: str | None = None) -> str | None:
     """Hard stop for every project (also ones without a harness config): creating or merging PRs and
     creating issues, via gh or `gh api`, only works as an account in [github].write_accounts."""
+    workdir = cwd
     for toks in split_segments(command):
+        if toks[0] == "cd" and len(toks) > 1:
+            workdir = toks[1] if os.path.isabs(toks[1]) else os.path.join(workdir or ".", toks[1])
+            continue
+        sub, args, cdir = git_parts(toks)
+        if sub == "push":
+            target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
+            denial = push_denial(command, args, cfg, target)
+            if denial:
+                return denial
         if Path(toks[0]).name != "gh" or len(toks) < 3:
             continue
         if toks[1] == "auth" and toks[2] == "switch":
@@ -977,7 +1017,7 @@ def check_github_global(command: str, cfg: dict) -> str | None:
 def hook_guard_github(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
-    reason = check_github_global(cmd, cfg)
+    reason = check_github_global(cmd, cfg, payload.get("cwd"))
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -987,7 +1027,7 @@ def hook_guard_github(cfg):
 def hook_guard_bash(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
-    reason = check_bash(cmd, cfg, payload.get("cwd"))
+    reason = check_bash(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")))
     if reason:
         log_event({"kind": "guard_block", "run_id": current_run_id(),
                    "stage": (payload.get("agent_type") or "manager").split(":")[-1], "command": cmd[:300], "reason": reason})
@@ -2604,9 +2644,10 @@ def merge_project_settings(root: Path, git_mode: str = "uncommitted") -> Path:
         if rule not in allow:
             allow.append(rule)
     deny = perms.setdefault("deny", [])
+    # Push is gated by the guard hook (write_accounts only), so drop the blanket deny older versions wrote.
     for rule in ("Bash(git push *)", "Bash(git push)"):
-        if rule not in deny:
-            deny.append(rule)
+        if rule in deny:
+            deny.remove(rule)
     write_json(path, data)
     return path
 
@@ -2790,7 +2831,7 @@ def cmd_doctor(a, cfg):
             except RuntimeError as exc:
                 line(False, f"ping failed: {exc}")
     g = (cfg.get("git") or {}).get("mode", "uncommitted")
-    print(f"\nGit mode: {g}  (push always blocked)")
+    print(f"\nGit mode: {g}  (push only as a [github].write_accounts account)")
     print("\nAll good." if ok else "\nFix the items marked !! above.")
     sys.exit(0 if ok else 1)
 

@@ -22,7 +22,7 @@ Harness is my answer to that:
   from a different lab (DeepSeek by default), so it's less likely to share the same blind spots.
 - **Adversarial review with verification.** A second agent checks every review finding against the
   real code. It drops false positives and adjusts severities before anything goes back to the engineer.
-- **Humans stay in control.** The plan needs my approval before any code is written. Agents can't push,
+- **Humans stay in control.** The plan needs my approval before any code is written. Subagents can't push,
   rewrite history or post to GitHub. PR reviews go up only as *pending* reviews, which I submit myself.
 - **Measured, not vibes.** Every stage logs tokens, cost, duration and outcome. `/harness-report`
   breaks down cost, quality and speed by stage and model, and I rate each run 1–5.
@@ -72,9 +72,10 @@ which keeps its context small over long runs.
   (jest, pytest, Django, tsc, eslint). Gates then fail only on *new* failures, so the pipeline works on
   real codebases whose test suites aren't green.
 - **Git guard hook.** A `PreToolUse` hook parses every shell command from the manager and all subagents.
-  It blocks `push`, `pull`, history rewrites, commits to protected branches and GitHub write commands.
-  `gh pr create`, `gh pr merge` and `gh issue create` are the exception: allowed only when gh is logged in as an account in
-  `[github] write_accounts` (default `Arbelaezch`) and the project isn't pinned to another account.
+  It blocks `pull`, history rewrites, commits to protected branches and GitHub write commands.
+  `git push` (main session only, never subagents), `gh pr create`, `gh pr merge` and `gh issue create` are the exception: allowed
+  only when gh is logged in as an account in `[github] write_accounts` (default `Arbelaezch`) and the project isn't pinned to
+  another account. Pushes are never forced, deleting or to a protected branch.
   It supports an `uncommitted` mode and a `commit` mode per project.
 - **Pluggable outside reviewer.** Any OpenAI-compatible chat API works (DeepSeek, Z.ai GLM, OpenRouter).
   Cost tracking includes peak/off-peak pricing windows.
@@ -149,8 +150,8 @@ whatever account they're signed into, and the session-start hook warns if that d
 - `[project]`: `name`, `description`, `review_focus` (checks that reviewers make on every review).
 - `[accounts]`: `claude` (account name), `github` (gh user; the token comes from `gh auth token --user`),
   `git_email` (doctor warns when a repo commits as someone else).
-- `[github]`: `write_accounts`, the gh logins allowed to create/merge PRs and create issues (default `["Arbelaezch"]`; any other, e.g. a work login, is always denied).
-- `[git]`: `base_branch`, `mode = "uncommitted" | "commit"`. Push is always blocked.
+- `[github]`: `write_accounts`, the gh logins allowed to push, create/merge PRs and create issues (default `["Arbelaezch"]`; any other, e.g. a work login, is always denied).
+- `[git]`: `base_branch`, `mode = "uncommitted" | "commit"`. Push is allowed only under `[github] write_accounts`.
 - `[repos.<name>]`: `path`, `description`, `gates = [{ name, kind, cmd, cwd }]`, where `kind` is
   jest, pytest, django, tsc or eslint.
 - Any section from [`scripts/defaults.toml`](scripts/defaults.toml) can be overridden, such as

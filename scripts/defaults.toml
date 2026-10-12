@@ -28,12 +28,13 @@ failure_tail_lines = 60
 #   "uncommitted" - agents edit files on a feature branch; no staging, no commits.
 #   "commit"      - agents may `git add` / `git commit` on the feature branch
 #                   (one commit per task). Commits to protected branches are blocked.
-# `git push`, `git pull`, history rewrites and GitHub write commands (PR/issue edits, comments, reviews,
+# Pull, history rewrites and GitHub write commands (PR/issue edits, comments, reviews,
 # merges, except as below) are always blocked for agents. Pending PR reviews are created only by `harness pr post`.
-# `gh pr create`, `gh pr merge` and `gh issue create` are allowed only under the accounts in [github].write_accounts.
+# Push (main session only, never subagents; no force, deletes or protected branches), `gh pr create`,
+# `gh pr merge` and `gh issue create` are allowed only under the accounts in [github].write_accounts.
 # ---------------------------------------------------------------------------
 [github]
-# gh logins allowed to create/merge PRs and create issues. Any other account (e.g. a work login) is always denied,
+# gh logins allowed to push, create/merge PRs and create issues. Any other account (e.g. a work login) is always denied,
 # including when a project is pinned to it with [accounts] github = "...".
 write_accounts = ["Arbelaezch"]
 
