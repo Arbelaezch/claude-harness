@@ -845,6 +845,37 @@ def current_branch(path: str | None) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+# gh subcommands that need an account from [github].write_accounts instead of being blocked outright.
+GH_ACCOUNT_GATED = {("pr", "create"), ("pr", "merge"), ("issue", "create")}
+
+
+def github_create_denial(command: str, cfg: dict, what: str) -> str | None:
+    """`gh pr create|merge` / `gh issue create` are allowed only as an account listed in [github].write_accounts
+    (default: personal only). Fails closed: unknown identity, token overrides and a project pinned to
+    another account all deny."""
+    allowed = {u.lower() for u in ((cfg.get("github") or {}).get("write_accounts") or [])}
+    if not allowed:
+        return f"`{what}` is blocked: no GitHub account is allowed to create/merge PRs or create issues ([github].write_accounts)."
+    if re.search(r"\b(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GH_HOST|GH_CONFIG_DIR)\b", command):
+        return f"`{what}` is blocked: don't override the GitHub token or host; it must run as your active gh account."
+    pinned = ((cfg.get("accounts") or {}).get("github") or "").strip()
+    if pinned and pinned.lower() not in allowed:
+        return (f"`{what}` is blocked: this project uses GitHub account '{pinned}', which isn't allowed to "
+                f"create or merge PRs or create issues. Do it yourself.")
+    try:
+        r = subprocess.run([GH, "api", "user", "--jq", ".login"], capture_output=True, text=True,
+                           timeout=10, env=NET_ENV)
+        active = r.stdout.strip() if r.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        active = ""
+    if not active:
+        return f"`{what}` is blocked: couldn't confirm which GitHub account gh is using."
+    if active.lower() not in allowed:
+        return (f"`{what}` is blocked: gh is logged in as '{active}', which isn't allowed to create or merge PRs or "
+                f"create issues. Only: {', '.join(sorted(allowed))}.")
+    return None
+
+
 def check_bash(command: str, cfg: dict, cwd: str | None = None) -> str | None:
     """Return a denial reason, or None when the command is allowed."""
     gcfg = cfg.get("git") or {}
@@ -856,12 +887,19 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None) -> str | None:
             workdir = toks[1] if os.path.isabs(toks[1]) else os.path.join(workdir or ".", toks[1])
             continue
         name = Path(toks[0]).name
+        if name == "gh" and len(toks) >= 3 and toks[1] == "auth" and toks[2] == "switch":
+            return "`gh auth switch` is blocked: the GitHub identity can't be changed from inside a session."
+        if name == "gh" and len(toks) >= 3 and (toks[1], toks[2]) in GH_ACCOUNT_GATED:
+            denial = github_create_denial(command, cfg, f"gh {toks[1]} {toks[2]}")
+            if denial:
+                return denial
+            continue
         if name == "gh" and len(toks) >= 3 and toks[1] == "pr" and toks[2] in (
-                "create", "merge", "close", "edit", "ready", "review", "comment", "reopen", "lock"):
+                "close", "edit", "ready", "review", "comment", "reopen", "lock"):
             return (f"`gh pr {toks[2]}` is blocked: you manage PRs yourself. Pending reviews are created only "
                     f"with `harness pr post` after the user confirms.")
         if name == "gh" and len(toks) >= 3 and toks[1] == "issue" and toks[2] in (
-                "create", "close", "comment", "edit", "delete", "reopen", "lock", "transfer", "pin"):
+                "close", "comment", "edit", "delete", "reopen", "lock", "transfer", "pin"):
             return f"`gh issue {toks[2]}` is blocked: the harness only reads issues."
         if name == "gh" and len(toks) >= 2 and toks[1] == "api":
             rest = toks[2:]
@@ -910,6 +948,42 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None) -> str | None:
     return None
 
 
+def check_github_global(command: str, cfg: dict) -> str | None:
+    """Hard stop for every project (also ones without a harness config): creating or merging PRs and
+    creating issues, via gh or `gh api`, only works as an account in [github].write_accounts."""
+    for toks in split_segments(command):
+        if Path(toks[0]).name != "gh" or len(toks) < 3:
+            continue
+        if toks[1] == "auth" and toks[2] == "switch":
+            return "`gh auth switch` is blocked: the GitHub identity can't be changed from inside a session."
+        if (toks[1], toks[2]) in GH_ACCOUNT_GATED:
+            denial = github_create_denial(command, cfg, f"gh {toks[1]} {toks[2]}")
+            if denial:
+                return denial
+        if toks[1] == "api":
+            rest = toks[2:]
+            method = next((rest[i + 1] for i, t in enumerate(rest[:-1]) if t in ("-X", "--method")), None)
+            method = method or next((t.split("=", 1)[1] for t in rest if t.startswith("--method=")), None)
+            writes = any(t in ("-f", "-F", "--field", "--raw-field", "--input") or t.startswith(("--field=", "--raw-field="))
+                         for t in rest)
+            if ((method and method.upper() != "GET") or (writes and not method)) and \
+                    any(re.search(r"graphql|/(issues|pulls)\b", t) for t in rest):
+                denial = github_create_denial(command, cfg, "gh api (issue/PR write)")
+                if denial:
+                    return denial
+    return None
+
+
+def hook_guard_github(cfg):
+    payload = json.loads(sys.stdin.read() or "{}")
+    cmd = (payload.get("tool_input") or {}).get("command", "")
+    reason = check_github_global(cmd, cfg)
+    if reason:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": f"[harness github guard] {reason}"}}))
+
+
 def hook_guard_bash(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
@@ -951,6 +1025,9 @@ def hook_session_start(cfg):
 
 
 def cmd_hook(a, cfg):
+    if a.event == "guard-github":  # user-level hook: applies in every project, configured or not
+        hook_guard_github(cfg)
+        return
     if not CONFIGURED:
         if a.event != "session-start":
             sys.stdin.read()
@@ -2743,7 +2820,7 @@ def main(argv=None):
     s.set_defaults(fn=cmd_run_show)
 
     s = sub.add_parser("hook", help="(used by .claude/settings.json)")
-    s.add_argument("event", choices=["subagent-stop", "guard-bash", "session-start"])
+    s.add_argument("event", choices=["subagent-stop", "guard-bash", "guard-github", "session-start"])
     s.set_defaults(fn=cmd_hook)
 
     s = sub.add_parser("branch", help="fetch origin and create the work branch from origin/<base>")
