@@ -23,7 +23,9 @@ Harness is my answer to that:
 - **Adversarial review with verification.** A second agent checks every review finding against the
   real code. It drops false positives and adjusts severities before anything goes back to the engineer.
 - **Humans stay in control.** The plan needs my approval before any code is written. Subagents can't push,
-  rewrite history or post to GitHub. PR reviews go up only as *pending* reviews, which I submit myself.
+  rewrite history or write to GitHub. The main session commits, pushes and edits PRs only as my personal
+  GitHub account, after I've reviewed and asked. PR reviews from the harness go up only as *pending* reviews,
+  which I submit myself.
 - **Measured, not vibes.** Every stage logs tokens, cost, duration and outcome. `/harness-report`
   breaks down cost, quality and speed by stage and model, and I rate each run 1–5.
 
@@ -72,11 +74,16 @@ which keeps its context small over long runs.
   (jest, pytest, Django, tsc, eslint). Gates then fail only on *new* failures, so the pipeline works on
   real codebases whose test suites aren't green.
 - **Git guard hook.** A `PreToolUse` hook parses every shell command from the manager and all subagents.
-  It blocks `pull`, history rewrites, commits to protected branches and GitHub write commands.
-  `git push` (main session only, never subagents), `gh pr create`, `gh pr merge` and `gh issue create` are the exception: allowed
-  only when gh is logged in as an account in `[github] write_accounts` (default `Arbelaezch`) and the project isn't pinned to
-  another account. Pushes are never forced, deleting or to a protected branch.
-  It supports an `uncommitted` mode and a `commit` mode per project.
+  Subagents can never push or write to GitHub. What the main session can do depends on the gh login:
+  - **Write account** (`[github] write_accounts`, default `Arbelaezch`, my personal account): commit, push,
+    merge, cherry-pick, revert, tag, switch branches, stash, and every PR/issue write (create, merge, edit,
+    comment, review). A project pinned to another account is not a write account.
+  - **Any other account** (e.g. work): only create/switch branches, stash, `gh pr create` and
+    `gh issue create`. No commit, push, merge or PR/issue edits.
+  - **Always blocked:** `pull`, history rewrites, force/deleting/mirror pushes, pushes or commits on protected
+    branches, `gh auth switch`, token/host overrides, an unknown gh identity, and deleting repos or issues.
+
+  It supports an `uncommitted` mode and a `commit` mode per project; the mode only governs subagents.
 - **Pluggable outside reviewer.** Any OpenAI-compatible chat API works (DeepSeek, Z.ai GLM, OpenRouter).
   Cost tracking includes peak/off-peak pricing windows.
 - **Cost ledger.** A `SubagentStop` hook parses each agent's transcript and prices its token usage
@@ -150,8 +157,8 @@ whatever account they're signed into, and the session-start hook warns if that d
 - `[project]`: `name`, `description`, `review_focus` (checks that reviewers make on every review).
 - `[accounts]`: `claude` (account name), `github` (gh user; the token comes from `gh auth token --user`),
   `git_email` (doctor warns when a repo commits as someone else).
-- `[github]`: `write_accounts`, the gh logins allowed to push, create/merge PRs and create issues (default `["Arbelaezch"]`; any other, e.g. a work login, is always denied).
-- `[git]`: `base_branch`, `mode = "uncommitted" | "commit"`. Push is allowed only under `[github] write_accounts`.
+- `[github]`: `write_accounts`, the gh logins that can commit, push and write to PRs/issues (default `["Arbelaezch"]`; any other, e.g. a work login, can only create PRs and issues and work with local branches).
+- `[git]`: `base_branch`, `mode = "uncommitted" | "commit"` (what subagents may do; committing as a subagent also needs a `write_accounts` login).
 - `[repos.<name>]`: `path`, `description`, `gates = [{ name, kind, cmd, cwd }]`, where `kind` is
   jest, pytest, django, tsc or eslint.
 - Any section from [`scripts/defaults.toml`](scripts/defaults.toml) can be overridden, such as

@@ -789,15 +789,16 @@ ALWAYS_BLOCKED = {
     "rebase": "Rewriting history is not allowed.",
     "filter-branch": "Rewriting history is not allowed.",
     "clean": "git clean deletes untracked files.",
+    "am": "Not part of the pipeline.",
     "remote": None,  # only mutating subcommands, checked below
 }
-UNCOMMITTED_BLOCKED = {
+# Why subagents can't run these; the main session may (account rules above GH_ANY_ACCOUNT).
+SUBAGENT_BLOCKED = {
     "commit": "Git mode is 'uncommitted': leave changes in the working tree for review.",
     "add": "Git mode is 'uncommitted': don't stage changes.",
     "stash": "Stashing hides work from review.",
     "merge": "Merging is not part of the pipeline.",
     "cherry-pick": "Not part of the pipeline.",
-    "am": "Not part of the pipeline.",
     "revert": "Not part of the pipeline.",
 }
 
@@ -844,23 +845,38 @@ def current_branch(path: str | None) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-# gh subcommands that need an account from [github].write_accounts instead of being blocked outright.
-GH_ACCOUNT_GATED = {("pr", "create"), ("pr", "merge"), ("issue", "create")}
+# GitHub / git write policy (see [github] in scripts/defaults.toml). Two roles x two account classes:
+#   * "writer" account = a gh login in [github].write_accounts (default: personal). Main session only:
+#     commit/add, push, merge/cherry-pick/revert/tag, and every PR/issue write (create, merge, edit, comment, review...).
+#   * any other account (e.g. work): main session may only create branches, switch branches, stash, and run
+#     `gh pr create` / `gh issue create`. No commit, push, merge or other writes.
+#   * subagents never push or write to GitHub (and only commit in git mode "commit", on a writer account).
+# Always blocked: force/delete/mirror/protected-branch pushes, pull, history rewrites, token/host overrides, an unknown gh
+# identity (fails closed), `gh auth switch`, and repo/issue deletion.
+GH_ANY_ACCOUNT = {("pr", "create"), ("issue", "create")}
+GH_WRITER_ONLY = (
+    {("pr", s) for s in ("merge", "edit", "ready", "close", "reopen", "comment", "review", "lock", "unlock",
+                         "update-branch", "revert")}
+    | {("issue", s) for s in ("edit", "comment", "close", "reopen", "lock", "unlock", "pin", "unpin", "develop")}
+)
+GH_NEVER = {("issue", "delete"), ("issue", "transfer"), ("repo", "delete"), ("repo", "edit"), ("repo", "rename")}
+GH_OVERRIDE_RE = re.compile(r"\b(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GH_HOST|GH_CONFIG_DIR)\b")
+GIT_WRITER_ONLY = ("commit", "add", "merge", "cherry-pick", "revert")
 
 
-def github_create_denial(command: str, cfg: dict, what: str) -> str | None:
-    """`git push`, `gh pr create|merge` and `gh issue create` are allowed only as an account listed in
-    [github].write_accounts (default: personal only). Fails closed: unknown identity, token overrides and a
-    project pinned to another account all deny."""
-    allowed = {u.lower() for u in ((cfg.get("github") or {}).get("write_accounts") or [])}
-    if not allowed:
-        return f"`{what}` is blocked: no GitHub account is allowed to push, create/merge PRs or create issues ([github].write_accounts)."
-    if re.search(r"\b(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GH_HOST|GH_CONFIG_DIR)\b", command):
-        return f"`{what}` is blocked: don't override the GitHub token or host; it must run as your active gh account."
+def write_accounts(cfg: dict) -> set[str]:
+    return {u.lower() for u in ((cfg.get("github") or {}).get("write_accounts") or [])}
+
+
+def github_account_state(command: str, cfg: dict) -> tuple[str | None, str]:
+    """('writer' | 'other' | None, why). None means the identity can't be trusted (token/host override or
+    unknown login), so callers fail closed."""
+    if GH_OVERRIDE_RE.search(command):
+        return None, "don't override the GitHub token or host; it must run as your active gh account"
+    allowed = write_accounts(cfg)
     pinned = ((cfg.get("accounts") or {}).get("github") or "").strip()
     if pinned and pinned.lower() not in allowed:
-        return (f"`{what}` is blocked: this project uses GitHub account '{pinned}', which isn't allowed to "
-                f"push, create or merge PRs or create issues. Do it yourself.")
+        return "other", f"this project uses GitHub account '{pinned}'"
     try:
         r = subprocess.run([GH, "api", "user", "--jq", ".login"], capture_output=True, text=True,
                            timeout=10, env=NET_ENV)
@@ -868,16 +884,39 @@ def github_create_denial(command: str, cfg: dict, what: str) -> str | None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         active = ""
     if not active:
-        return f"`{what}` is blocked: couldn't confirm which GitHub account gh is using."
-    if active.lower() not in allowed:
-        return (f"`{what}` is blocked: gh is logged in as '{active}', which isn't allowed to push, create or merge PRs "
-                f"or create issues. Only: {', '.join(sorted(allowed))}.")
+        return None, "couldn't confirm which GitHub account gh is using"
+    return ("writer" if active.lower() in allowed else "other"), f"gh is logged in as '{active}'"
+
+
+def subagent_denial(what: str) -> str:
+    return f"`{what}` is blocked for subagents. Only the main session can do this, and only as a [github].write_accounts account."
+
+
+def writer_denial(command: str, cfg: dict, what: str) -> str | None:
+    """Allow only when gh runs as a [github].write_accounts account. Fails closed."""
+    allowed = sorted(write_accounts(cfg))
+    if not allowed:
+        return f"`{what}` is blocked: no GitHub account is allowed to write ([github].write_accounts is empty)."
+    role, why = github_account_state(command, cfg)
+    if role == "writer":
+        return None
+    if role is None:
+        return f"`{what}` is blocked: {why}."
+    return f"`{what}` is blocked: {why}, which isn't in [github].write_accounts ({', '.join(allowed)}). Do it yourself."
+
+
+def any_account_denial(command: str, cfg: dict, what: str) -> str | None:
+    """Creating PRs/issues works on any account (when the user asks), but never with a token/host override."""
+    if GH_OVERRIDE_RE.search(command):
+        return f"`{what}` is blocked: don't override the GitHub token or host; it must run as your active gh account."
     return None
 
 
-def push_denial(command: str, args: list[str], cfg: dict, target: str | None) -> str | None:
-    """`git push` runs only as a [github].write_accounts account, and never as a force push, a branch/tag
-    deletion, a mirror push or a push to a protected branch."""
+def push_denial(command: str, args: list[str], cfg: dict, target: str | None, subagent: bool = False) -> str | None:
+    """`git push` runs only in the main session, as a [github].write_accounts account, and never as a force
+    push, a branch/tag deletion, a mirror push or a push to a protected branch."""
+    if subagent:
+        return subagent_denial("git push")
     protected = set((cfg.get("git") or {}).get("protected_branches", []))
     positional = [a for a in args if not a.startswith("-")]
     for a in args:
@@ -896,7 +935,46 @@ def push_denial(command: str, args: list[str], cfg: dict, target: str | None) ->
         dst = ref.split(":", 1)[-1].removeprefix("refs/heads/")
         if dst in protected or dst == "HEAD" and current_branch(target) in protected:
             return f"Refusing to push to protected branch '{dst}'."
-    return github_create_denial(command, cfg, "git push")
+    return writer_denial(command, cfg, "git push")
+
+
+def gh_api_is_write(rest: list[str]) -> bool:
+    method = next((rest[i + 1] for i, t in enumerate(rest[:-1]) if t in ("-X", "--method")), None)
+    method = method or next((t.split("=", 1)[1] for t in rest if t.startswith("--method=")), None)
+    writes = any(t in ("-f", "-F", "--field", "--raw-field", "--input") or t.startswith(("--field=", "--raw-field="))
+                 for t in rest)
+    return bool((method and method.upper() != "GET") or (writes and not method))
+
+
+def gh_denial(toks: list[str], command: str, cfg: dict, subagent: bool, strict: bool) -> str | None:
+    """Policy for one `gh` invocation. `strict` (harness projects) also blocks repo changes and non-issue/PR
+    `gh api` writes, which the every-project guard leaves alone."""
+    if len(toks) < 3:
+        return None
+    pair = (toks[1], toks[2])
+    what = f"gh {toks[1]} {toks[2]}"
+    if pair == ("auth", "switch"):
+        return "`gh auth switch` is blocked: the GitHub identity can't be changed from inside a session."
+    if pair in GH_NEVER:
+        return None if (pair[0] == "repo" and not strict) else f"`{what}` is blocked: the harness never deletes or transfers issues or changes repos."
+    if pair in GH_ANY_ACCOUNT:
+        return subagent_denial(what) if subagent else any_account_denial(command, cfg, what)
+    if pair in GH_WRITER_ONLY:
+        return subagent_denial(what) if subagent else writer_denial(command, cfg, what)
+    if toks[1] == "api" and gh_api_is_write(toks[2:]):
+        if any(re.search(r"graphql|/(issues|pulls)\b", t) for t in toks[2:]):
+            return subagent_denial("gh api (issue/PR write)") if subagent else writer_denial(command, cfg, "gh api (issue/PR write)")
+        if strict:
+            return "`gh api` writes are blocked except issue/PR writes (main session, [github].write_accounts account only)."
+    return None
+
+
+def git_writer_denial(sub: str, args: list[str], command: str, cfg: dict) -> str | None:
+    """Local git commands that change history need a [github].write_accounts account, so the work account
+    never commits. (Branch create/switch and stash stay open to the main session on any account.)"""
+    if sub in GIT_WRITER_ONLY or (sub == "tag" and args and not args[0].startswith("-l") and args[0] not in ("--list", "-d", "--delete")):
+        return writer_denial(command, cfg, f"git {sub}")
+    return None
 
 
 def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False) -> str | None:
@@ -910,30 +988,11 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
             workdir = toks[1] if os.path.isabs(toks[1]) else os.path.join(workdir or ".", toks[1])
             continue
         name = Path(toks[0]).name
-        if name == "gh" and len(toks) >= 3 and toks[1] == "auth" and toks[2] == "switch":
-            return "`gh auth switch` is blocked: the GitHub identity can't be changed from inside a session."
-        if name == "gh" and len(toks) >= 3 and (toks[1], toks[2]) in GH_ACCOUNT_GATED:
-            denial = github_create_denial(command, cfg, f"gh {toks[1]} {toks[2]}")
+        if name == "gh":
+            denial = gh_denial(toks, command, cfg, subagent, strict=True)
             if denial:
                 return denial
             continue
-        if name == "gh" and len(toks) >= 3 and toks[1] == "pr" and toks[2] in (
-                "close", "edit", "ready", "review", "comment", "reopen", "lock"):
-            return (f"`gh pr {toks[2]}` is blocked: you manage PRs yourself. Pending reviews are created only "
-                    f"with `harness pr post` after the user confirms.")
-        if name == "gh" and len(toks) >= 3 and toks[1] == "issue" and toks[2] in (
-                "close", "comment", "edit", "delete", "reopen", "lock", "transfer", "pin"):
-            return f"`gh issue {toks[2]}` is blocked: the harness only reads issues."
-        if name == "gh" and len(toks) >= 2 and toks[1] == "api":
-            rest = toks[2:]
-            method = next((rest[i + 1] for i, t in enumerate(rest[:-1]) if t in ("-X", "--method")), None)
-            method = method or next((t.split("=", 1)[1] for t in rest if t.startswith("--method=")), None)
-            writes = any(t in ("-f", "-F", "--field", "--raw-field", "--input") or t.startswith(("--field=", "--raw-field="))
-                         for t in rest)
-            if (method and method.upper() != "GET") or (writes and not method):
-                return "`gh api` write requests are blocked; the harness only reads from GitHub."
-        if name == "gh" and len(toks) >= 3 and toks[1] == "repo" and toks[2] in ("delete", "edit", "rename"):
-            return "Changing GitHub repos is blocked."
         sub, args, cdir = git_parts(toks)
         if not sub:
             continue
@@ -941,9 +1000,7 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
         if sub == "remote" and args and args[0] in ("add", "remove", "rm", "rename", "set-url", "set-head"):
             return "Changing git remotes is blocked."
         if sub == "push":
-            if subagent:
-                return "`git push` is blocked for subagents. Pushing is done by the main session or by you."
-            denial = push_denial(command, args, cfg, target)
+            denial = push_denial(command, args, cfg, target, subagent)
             if denial:
                 return denial
             continue
@@ -957,30 +1014,35 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
             creating = any(x in args for x in ("-b", "-B", "-c", "-C", "--create", "--orphan"))
             if "--" in args or "." in args:
                 return "`git checkout -- <path>` discards changes and is blocked."
-            if not creating:
-                return (f"`git {sub}` between branches is blocked inside the pipeline "
+            if subagent and not creating:
+                return (f"`git {sub}` between branches is blocked for subagents "
                         "(branches are managed by `harness branch`).")
         if sub == "branch" and any(x in args for x in ("-D", "-d", "--delete", "-m", "-M", "--force", "-f")):
             return "Deleting, renaming or forcing branches is blocked."
         if sub == "tag" and args and not args[0].startswith("-l") and args[0] not in ("--list",):
-            return "Creating or deleting tags is blocked."
+            if subagent or args[0] in ("-d", "--delete"):
+                return "Deleting tags, or creating them from a subagent, is blocked."
         if sub == "commit" and ("--amend" in args):
             return "`git commit --amend` rewrites history and is blocked."
-        if mode != "commit" and sub in UNCOMMITTED_BLOCKED:
-            return f"`git {sub}` is blocked. {UNCOMMITTED_BLOCKED[sub]} (Change git.mode in `.claude/harness.toml` to allow commits.)"
-        if mode == "commit":
-            if sub in ("stash", "merge", "cherry-pick", "am", "revert"):
-                return f"`git {sub}` is not part of the pipeline."
-            if sub in ("commit", "add"):
-                br = current_branch(target)
-                if br and br in protected:
-                    return f"Refusing `git {sub}` on protected branch '{br}'. Run `harness branch` first."
+        if subagent:
+            if sub == "stash":
+                return f"`git stash` is blocked for subagents. {SUBAGENT_BLOCKED['stash']}"
+            if sub in GIT_WRITER_ONLY and (mode != "commit" or sub not in ("commit", "add")):
+                hint = " (Set git.mode = \"commit\" in `.claude/harness.toml` to let the engineer commit.)" if sub in ("commit", "add") else ""
+                return f"`git {sub}` is blocked for subagents. {SUBAGENT_BLOCKED[sub]}{hint}"
+        if sub in GIT_WRITER_ONLY:
+            br = current_branch(target)
+            if br and br in protected:
+                return f"Refusing `git {sub}` on protected branch '{br}'. Run `harness branch` first."
+        denial = git_writer_denial(sub, args, command, cfg)
+        if denial:
+            return denial
     return None
 
 
-def check_github_global(command: str, cfg: dict, cwd: str | None = None) -> str | None:
-    """Hard stop for every project (also ones without a harness config): creating or merging PRs and
-    creating issues, via gh or `gh api`, only works as an account in [github].write_accounts."""
+def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False) -> str | None:
+    """Hard stop for every project (also ones without a harness config): the account rules for push, commit,
+    merge, tag and PR/issue writes, via git, gh or `gh api`."""
     workdir = cwd
     for toks in split_segments(command):
         if toks[0] == "cd" and len(toks) > 1:
@@ -989,35 +1051,24 @@ def check_github_global(command: str, cfg: dict, cwd: str | None = None) -> str 
         sub, args, cdir = git_parts(toks)
         if sub == "push":
             target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
-            denial = push_denial(command, args, cfg, target)
+            denial = push_denial(command, args, cfg, target, subagent)
             if denial:
                 return denial
-        if Path(toks[0]).name != "gh" or len(toks) < 3:
-            continue
-        if toks[1] == "auth" and toks[2] == "switch":
-            return "`gh auth switch` is blocked: the GitHub identity can't be changed from inside a session."
-        if (toks[1], toks[2]) in GH_ACCOUNT_GATED:
-            denial = github_create_denial(command, cfg, f"gh {toks[1]} {toks[2]}")
+        elif sub:
+            denial = git_writer_denial(sub, args, command, cfg)
             if denial:
                 return denial
-        if toks[1] == "api":
-            rest = toks[2:]
-            method = next((rest[i + 1] for i, t in enumerate(rest[:-1]) if t in ("-X", "--method")), None)
-            method = method or next((t.split("=", 1)[1] for t in rest if t.startswith("--method=")), None)
-            writes = any(t in ("-f", "-F", "--field", "--raw-field", "--input") or t.startswith(("--field=", "--raw-field="))
-                         for t in rest)
-            if ((method and method.upper() != "GET") or (writes and not method)) and \
-                    any(re.search(r"graphql|/(issues|pulls)\b", t) for t in rest):
-                denial = github_create_denial(command, cfg, "gh api (issue/PR write)")
-                if denial:
-                    return denial
+        if Path(toks[0]).name == "gh":
+            denial = gh_denial(toks, command, cfg, subagent, strict=False)
+            if denial:
+                return denial
     return None
 
 
 def hook_guard_github(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
-    reason = check_github_global(cmd, cfg, payload.get("cwd"))
+    reason = check_github_global(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")))
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -2644,7 +2695,7 @@ def merge_project_settings(root: Path, git_mode: str = "uncommitted") -> Path:
         if rule not in allow:
             allow.append(rule)
     deny = perms.setdefault("deny", [])
-    # Push is gated by the guard hook (write_accounts only), so drop the blanket deny older versions wrote.
+    # Push is gated by the guard hook (main session, [github].write_accounts only), so drop the blanket deny older versions wrote.
     for rule in ("Bash(git push *)", "Bash(git push)"):
         if rule in deny:
             deny.remove(rule)
@@ -2831,7 +2882,7 @@ def cmd_doctor(a, cfg):
             except RuntimeError as exc:
                 line(False, f"ping failed: {exc}")
     g = (cfg.get("git") or {}).get("mode", "uncommitted")
-    print(f"\nGit mode: {g}  (push only as a [github].write_accounts account)")
+    print(f"\nGit mode: {g}  (applies to subagents; the main session commits and pushes only as a [github].write_accounts account)")
     print("\nAll good." if ok else "\nFix the items marked !! above.")
     sys.exit(0 if ok else 1)
 

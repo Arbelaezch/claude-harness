@@ -63,6 +63,8 @@ submit their pending review (Approve / Request changes / Comment). The choice of
 "4 - minor edits", "3 - significant edits", "2 - mostly rewrote it". Record with `H rate <score> --note "..."`.
 
 ## Rules
-- Never post, comment, approve or request changes any other way. The guard blocks `gh pr review`,
-  `gh pr comment` and `gh api` writes. `H pr post` is the only path, and only after the user says yes.
+- Never post, comment, approve or request changes any other way in this flow, even though the guard would
+  let the main session do it on the personal GitHub account (it blocks `gh pr review`, `gh pr comment` and
+  `gh api` writes for subagents and for any other account). `H pr post` is the only path, and only after the
+  user says yes.
 - Never check out PR branches or modify the user's working trees.

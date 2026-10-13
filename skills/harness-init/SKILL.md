@@ -19,6 +19,8 @@ allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/harness.py *)
    - "Which Claude account should this project use?" with options from `claude_accounts` (e.g. work,
      personal).
    - "Which GitHub account?" with options from `github_accounts` (skip if there's only one, or none).
+     Only accounts in `[github] write_accounts` (the personal one by default) can commit, push or edit
+     PRs/issues; any other account can only create PRs and issues, so say so when they pick one.
    - "Git mode?" with "Leave changes uncommitted (I review and commit)" and "Commit on the feature
      branch (one commit per task)".
    - Confirm the base branch if the guesses differ between repos or look wrong (e.g. `main` vs `dev`).

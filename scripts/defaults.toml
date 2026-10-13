@@ -23,19 +23,26 @@ autodetect_lint = false
 failure_tail_lines = 60
 
 # ---------------------------------------------------------------------------
-# Git policy. Enforced by a PreToolUse hook on every Bash call, for the manager
-# and every subagent.
-#   "uncommitted" - agents edit files on a feature branch; no staging, no commits.
-#   "commit"      - agents may `git add` / `git commit` on the feature branch
-#                   (one commit per task). Commits to protected branches are blocked.
-# Pull, history rewrites and GitHub write commands (PR/issue edits, comments, reviews,
-# merges, except as below) are always blocked for agents. Pending PR reviews are created only by `harness pr post`.
-# Push (main session only, never subagents; no force, deletes or protected branches), `gh pr create`,
-# `gh pr merge` and `gh issue create` are allowed only under the accounts in [github].write_accounts.
+# Git and GitHub policy. Enforced by PreToolUse hooks on every Bash call.
+#
+# Subagents (the /ship engineer etc.) never push, open or edit PRs/issues, or write to GitHub.
+# `[git].mode` is their only git switch:
+#   "uncommitted" - they edit files on a feature branch; no staging, no commits.
+#   "commit"      - they may stage and commit on the feature branch (one commit per task),
+#                   but only as a [github].write_accounts account.
+#
+# The main session depends on the gh login:
+#   * write account (personal): commit, push, merge, cherry-pick, revert, tag, branch switch/stash,
+#     and every PR/issue write (create, merge, edit, comment, review). Commits go in after you review.
+#   * any other account (e.g. work): only branch create/switch, stash, `gh pr create` and `gh issue create`.
+#     No commit, push, merge, edits or comments.
+# Always blocked, for everyone: force/delete/mirror pushes, pushes to protected branches, commits on protected
+# branches, pull, history rewrites, `gh auth switch`, token/host overrides, an unknown gh identity,
+# and deleting repos/issues. Pending PR reviews are created only by `harness pr post`.
 # ---------------------------------------------------------------------------
 [github]
-# gh logins allowed to push, create/merge PRs and create issues. Any other account (e.g. a work login) is always denied,
-# including when a project is pinned to it with [accounts] github = "...".
+# gh logins that count as a write account (see above). Any other account (e.g. a work login) gets the
+# restricted set, including when a project is pinned to it with [accounts] github = "...".
 write_accounts = ["Arbelaezch"]
 
 [git]
