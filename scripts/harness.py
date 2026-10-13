@@ -1484,6 +1484,11 @@ def cmd_gates(a, cfg):
     if not targets:
         print("No changed repos; nothing to check.")
         return
+    max_attempt = (cfg.get("loop") or {}).get("max_gate_retries", 2) + 1
+    if a.attempt and a.attempt > max_attempt:
+        print(f"GATES: FAIL (attempt {a.attempt} exceeds the limit of {max_attempt}; stop and report the failure "
+              f"to the caller instead of retrying)")
+        sys.exit(1)
     tail_n = gcfg.get("failure_tail_lines", 60)
     all_ok = True
     logs = d / "gates"
@@ -1573,8 +1578,38 @@ def repo_diff(rname: str, rcfg: dict, run: dict, context: int = 12) -> tuple[str
     return diff, stat
 
 
+def split_diff_files(diff: str) -> dict[str, str]:
+    """Split a unified diff into {file header line: that file's diff text}."""
+    out: dict[str, str] = {}
+    for chunk in re.split(r"(?m)^(?=diff --git )", diff):
+        if chunk.strip():
+            out[chunk.split("\n", 1)[0]] = chunk
+    return out
+
+
+def round_diffs(d: Path, run: dict, cfg: dict, round_n: int) -> dict[str, str]:
+    """Per-repo diff for a review round. From round 2 on, a file whose diff is identical to the
+    previous round's is replaced by a one-line stub, so reviewers don't re-read unchanged code.
+    The full diff is snapshotted to diff-<n>.json for the next round (idempotent per round)."""
+    rs = repos(cfg)
+    prev = read_json(d / f"diff-{round_n - 1}.json", {}) if round_n > 1 else {}
+    full, shown = {}, {}
+    for rname in changed_repos(cfg, run):
+        diff, _ = repo_diff(rname, rs[rname], run)
+        full[rname] = diff
+        files = split_diff_files(diff)
+        old = split_diff_files(prev.get(rname, ""))
+        if not old:
+            shown[rname] = diff
+            continue
+        keep = [t if old.get(h) != t else f"{h}\n(unchanged since round {round_n - 1})\n" for h, t in files.items()]
+        shown[rname] = "".join(keep)
+    write_json(d / f"diff-{round_n}.json", full)
+    return shown
+
+
 def cmd_diff(a, cfg):
-    _, run = load_run()
+    d, run = load_run()
     rs = repos(cfg)
     if run.get("mode") == "review":
         for pr in run.get("prs", []):
@@ -1582,19 +1617,21 @@ def cmd_diff(a, cfg):
                   f"read files with: git -C {pr['path']} show {pr['ref']}:<path>) ===")
             print(pr.get("stat", "") if a.stat else pr_diff(pr))
         return
+    shown = round_diffs(d, run, cfg, a.round) if a.round and not a.stat else {}
     for rname in changed_repos(cfg, run):
-        diff, stat = repo_diff(rname, rs[rname], run)
         print(f"=== {rname} ({rs[rname]['path']}) ===")
-        print(stat if a.stat else diff)
+        if a.round and not a.stat:
+            print(shown[rname])
+        else:
+            diff, stat = repo_diff(rname, rs[rname], run)
+            print(stat if a.stat else diff)
 
 
 # --------------------------------------------------------------------------- review
-REVIEW_SYSTEM = """You are a senior staff engineer doing code review for a small product team.
-You are reviewing changes written by an AI coding agent from a different lab; be skeptical and concrete.
+REVIEW_INTRO = """You are a senior staff engineer doing code review for a small product team.
+You are reviewing changes written by an AI coding agent from a different lab; be skeptical and concrete."""
 
-{project_context}
-
-Look for, in priority order:
+REVIEW_CRITERIA = """Look for, in priority order:
 1. Bugs: wrong logic, unhandled errors or null/undefined, race conditions, off-by-one, broken edge cases.
 2. Security: missing authentication/authorization on endpoints, object-level permission gaps, data
    exposure in API responses, injection, secrets in code.
@@ -1612,13 +1649,20 @@ Severity:
 - "nit": minor; optional.
 
 Every finding must point at a specific file and line from the diff and quote the relevant code as evidence.
-If you are not confident a finding is real, lower its severity or leave it out. An empty list is a fine answer.
+If you are not confident a finding is real, lower its severity or leave it out. An empty list is a fine answer."""
 
-Respond with a single JSON object, no prose outside it:
+REVIEW_SCHEMA = """Respond with a single JSON object, no prose outside it:
 {"summary": "<2-3 sentences>",
  "findings": [{"severity": "blocking|should_fix|nit", "repo": "<repo name>", "file": "<path>", "line": <int or null>,
    "title": "<short>", "evidence": "<quoted code>", "detail": "<what is wrong and why>",
    "suggestion": "<concrete fix>", "status": "new|unresolved"}]}
+"status" is "unresolved" only when the finding repeats an issue from the previous round's list that still is not fixed."""
+
+REVIEW_SCHEMA_PR = """Respond with a single JSON object, no prose outside it:
+{"summary": "<2-3 sentences>",
+ "findings": [{"severity": "blocking|should_fix|nit", "repo": "<repo name>", "file": "<path>", "line": <int or null>,
+   "title": "<short>", "evidence": "<quoted code>", "detail": "<what is wrong and why>",
+   "suggestion": "<concrete fix>", "status": "new"}], "questions": [...]}
 "status" is "unresolved" only when the finding repeats an issue from the previous round's list that still is not fixed."""
 
 
@@ -1667,12 +1711,17 @@ def project_context(cfg: dict) -> str:
 
 
 def review_system_prompt(run: dict, cfg: dict | None = None) -> str:
-    base = REVIEW_SYSTEM.replace("{project_context}", project_context(cfg or load_config()))
-    if run.get("mode") != "review":
-        return base
-    rest = base.split("\n\n", 1)[1]  # drop the "AI-written changes" intro
-    rest = rest.replace('"status": "new|unresolved"}]}', '"status": "new"}], "questions": [...]}')
-    return PR_REVIEW_PREAMBLE + "\n\n" + rest
+    pr_mode = run.get("mode") == "review"
+    intro = PR_REVIEW_PREAMBLE if pr_mode else REVIEW_INTRO
+    schema_tail = REVIEW_SCHEMA_PR if pr_mode else REVIEW_SCHEMA
+    return f"{intro}\n\n{project_context(cfg or load_config())}\n\n{REVIEW_CRITERIA}\n\n{schema_tail}"
+
+
+def plan_digest(plan: str) -> str:
+    """Task headings, acceptance criteria and contract changes: what a re-review needs from plan.md."""
+    keep = [ln for ln in plan.splitlines() if ln.startswith(("# ", "### ")) or ln.lstrip("- ").startswith("Done when")]
+    contract = _plan_section(plan, "Contract changes")
+    return "\n".join(keep) + (f"\n\nContract changes:\n{contract}" if contract else "")
 
 
 def build_review_prompt(run: dict, d: Path, cfg: dict, round_n: int) -> tuple[str, bool]:
@@ -1683,17 +1732,21 @@ def build_review_prompt(run: dict, d: Path, cfg: dict, round_n: int) -> tuple[st
     parts = [f"# Task\n{run['task']}\n"]
     for name, title in (("brief.md", "Clarified requirements"), ("plan.md", "Implementation plan")):
         if (d / name).exists():
-            parts.append(f"# {title}\n{(d / name).read_text(encoding='utf-8')}\n")
+            text = (d / name).read_text(encoding="utf-8")
+            if round_n > 1 and name == "plan.md":
+                title, text = "Plan digest (full plan was in round 1)", plan_digest(text)
+            parts.append(f"# {title}\n{text}\n")
     prev = read_json(d / f"verified-{round_n - 1}.json") if round_n > 1 else None
     if prev:
         parts.append("# Findings from the previous round (confirmed by a second reviewer)\n"
                      "Check whether each one is now fixed. Repeat only the ones that are not, with status \"unresolved\".\n"
                      + json.dumps(prev.get("findings", []), indent=1) + "\n")
     diffs = []
-    for rname in changed_repos(cfg, run):
-        diff, _ = repo_diff(rname, rs[rname], run)
+    for rname, diff in round_diffs(d, run, cfg, round_n).items():
         diffs.append(f"## Repo: {rname} ({rs[rname].get('description', '')})\n```diff\n{diff}\n```\n")
     body = "# Changes\n" + ("\n".join(diffs) if diffs else "(no changes found)")
+    if round_n > 1:
+        body += "\nFiles marked unchanged were reviewed last round; the full cumulative diff is otherwise shown.\n"
     limit = rcfg.get("max_diff_chars", 300000)
     truncated = len(body) > limit
     if truncated:
@@ -1777,19 +1830,6 @@ def parse_json_content(text: str) -> dict:
         raise
 
 
-def write_review_md(path: Path, title: str, summary: str, findings: list[dict]) -> None:
-    lines = [f"# {title}", "", summary or "", ""]
-    for f in findings:
-        loc = f"{f.get('repo', '')}:{f.get('file', '')}" + (f":{f['line']}" if f.get("line") else "")
-        lines += [f"## {f['id']} [{f.get('severity')}] {f.get('title', '')}", f"`{loc}`", "",
-                  f.get("detail", ""), ""]
-        if f.get("evidence"):
-            lines += ["```", str(f["evidence"])[:1500], "```", ""]
-        if f.get("suggestion"):
-            lines += [f"**Suggestion:** {f['suggestion']}", ""]
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
 def cmd_review(a, cfg):
     d, run = load_run()
     rcfg = cfg.get("reviewer") or {}
@@ -1819,7 +1859,9 @@ def cmd_review(a, cfg):
         result = parse_json_content(msg.get("content", ""))
     except (json.JSONDecodeError, TypeError):
         (d / f"review-{a.round}.raw.txt").write_text(msg.get("content", "") or "", encoding="utf-8")
-        result = {"summary": "Reviewer returned unparseable output; see raw file.", "findings": [], "parse_error": True}
+        print(f"FALLBACK: {provider} returned unparseable output (kept in review-{a.round}.raw.txt), so there "
+              f"is no review yet. Spawn the claude-reviewer subagent for round {a.round}.")
+        sys.exit(4)
     findings = []
     for i, f in enumerate(result.get("findings") or [], 1):
         if not isinstance(f, dict):
@@ -1831,8 +1873,6 @@ def cmd_review(a, cfg):
            "truncated": truncated, "findings": findings,
            "questions": [q for q in result.get("questions") or [] if isinstance(q, dict)]}
     write_json(d / f"review-{a.round}.json", out)
-    write_review_md(d / f"review-{a.round}.md", f"Review round {a.round} ({provider}: {p['model']})",
-                    out["summary"], findings)
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEVERITIES}
     log_event({"kind": "llm_call", "run_id": run["id"], "stage": "reviewer", "round": a.round,
                "provider": provider, "gen_ai.system": provider, "gen_ai.request.model": p["model"],
@@ -1858,6 +1898,11 @@ def cmd_verdict(a, cfg):
         sys.exit(f"Missing {d}/verified-{a.round}.json (the verifier writes it)")
     by_id = {f["id"]: f for f in review.get("findings", [])}
     judged = {v.get("id"): v for v in verified.get("findings", []) if v.get("id")}
+    missing = [fid for fid in by_id if fid not in judged]
+    if missing:
+        print(f"INVALID: verified-{a.round}.json does not judge {', '.join(missing)}. Ask the verifier "
+              f"(SendMessage) to add them (every id from review-{a.round}.json exactly once), then rerun verdict.")
+        sys.exit(2)
     final = []
     stats = {"proposed": len(by_id), "confirmed": 0, "rejected": 0, "uncertain": 0, "unjudged": 0,
              "unresolved_from_previous": 0, "verifier_added": 0}
@@ -1874,6 +1919,8 @@ def cmd_verdict(a, cfg):
         if verdict == "confirmed" and f.get("status") == "unresolved":
             stats["unresolved_from_previous"] += 1
     for j, extra in enumerate(verified.get("additional") or [], 1):
+        if not (extra.get("file") and extra.get("detail")):
+            continue  # an added finding with no location or explanation can't be checked or fixed
         sev = extra.get("severity") if extra.get("severity") in SEVERITIES else "should_fix"
         final.append({**extra, "id": f"V{a.round}-{j}", "severity": sev, "verdict": "confirmed",
                       "source": "verifier"})
@@ -2938,6 +2985,7 @@ def main(argv=None):
 
     s = sub.add_parser("diff", help="show the run's diff across repos")
     s.add_argument("--stat", action="store_true")
+    s.add_argument("--round", type=int, help="review round n: from round 2 on, files unchanged since the previous round are stubbed")
     s.set_defaults(fn=cmd_diff)
 
     s = sub.add_parser("review", help="run the cross-lab reviewer for a round")
