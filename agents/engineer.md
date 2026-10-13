@@ -30,7 +30,10 @@ Rules:
   `NEEDS USER: <what and why>` instead of improvising.
 - Follow every rule in the CLAUDE.md files that apply to the code you edit.
 - Git: you are on a feature branch prepared for you. Don't switch branches, stash, reset, or
-  commit unless the delegation message says git mode is "commit" (a guard hook enforces this).
+  commit unless the delegation message says git mode is "commit" (a guard hook enforces this; even then,
+  committing works only on the user's personal GitHub account).
+- Never push, and never create, edit or comment on PRs or issues. Only the main session may, and only
+  when the user asks.
 - Never weaken or delete existing tests to make gates pass.
 
 When done editing, run the gates for your repo:

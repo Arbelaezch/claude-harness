@@ -117,14 +117,21 @@ For round n = 1, 2, ...:
    change spans repos, which `/review-pr` uses to pair PRs). Point the user to them.
 2. `H run end --status done` (or `escalated` if you stopped with open blocking findings).
 3. Tell the user, in a few lines: which branches hold the changes, that nothing is committed (unless
-   git mode is "commit"), open should_fix/nit items worth a look, and the run's cost line.
+   git mode is "commit"), open should_fix/nit items worth a look, and the run's cost line. On the personal
+   account, offer to commit, push and open the PR once they've reviewed; don't do it unprompted.
 4. Ask with AskUserQuestion: "How did this run go?" options "5 - merge as is", "4 - minor edits",
    "3 - significant edits", "2 - mostly redone" (Other lets them type 1 or a note). Record it with
    `H rate <score> --note "<note>"`. Skip if they dismiss it.
 
 ## Rules
-- Never commit, push, switch branches, stash or reset; the guard hook will block it anyway. If a
-  command is blocked, don't look for a workaround: report it.
+- Subagents never commit (unless git mode is "commit"), push, switch branches or stash, and never write to
+  GitHub; the guard hook enforces it.
+- You (the main session) may switch branches and stash. Don't reset or rewrite history.
+- Commit only after the user has reviewed the changes and says to. On the personal GitHub account
+  (`[github] write_accounts`), "commit" also means push. Open or edit a PR only when the user asks.
+- On any other account (e.g. work) never commit or push; the guard blocks it. You may still create a PR or
+  issue when asked.
+- If a command is blocked, don't look for a workaround: report it.
 - If anything unexpected happens (a subagent errors twice, the harness errors), stop, tell the user
   what happened, and end the run with `--status aborted` if they want to stop.
 - Keep your own messages to the user short; they can read every artifact in the run directory.

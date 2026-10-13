@@ -1,5 +1,5 @@
 {
-  "description": "Harness: git/GitHub guard, per-agent metrics, account check. Each hook does nothing in projects without .claude/harness.toml.",
+  "description": "Harness: git/GitHub guard, per-agent metrics, account check. Each hook does nothing in projects without .claude/harness.toml (the separate user-level `guard-github` hook applies the account rules in every project).",
   "hooks": {
     "PreToolUse": [
       {
