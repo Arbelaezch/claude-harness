@@ -14,7 +14,7 @@ logs into this conversation, and don't read source files. Read only the short ou
 commands and subagent replies.
 
 Arguments: `$ARGUMENTS`
-- `--quick`: no grill, no scouts, one review round. For small, well-understood changes.
+- `--quick`: no grill, one review round (scouts still run). For small, well-understood changes.
 - `--grill` / `--no-grill`: force the grill on or off. Otherwise ask.
 - Everything else is the task: a GitHub issue (URL, or `<repo>#<n>` where repo is the harness name, the
   folder name or the GitHub name) optionally followed by extra instructions, or a plain task
@@ -50,20 +50,23 @@ says enough.
 Then write `<run_dir>/brief.md`: decisions made, explicit non-goals, acceptance criteria. Even
 without a grill, if the user gave details beyond the one-line task, record them in brief.md.
 
-## 2. Scout (skip in quick mode)
+## 2. Scout
 Using the workspace CLAUDE.md and the repos in `.claude/harness.toml`, decide which repos the task likely
 touches (in a single-repo project, just that one). Spawn one
 `harness:scout` subagent per relevant repo **in parallel**, each told to write `<run_dir>/context-<repo>.md`.
-When unsure whether a repo is involved, include it; scouts are cheap.
+When unsure whether a repo is involved, include it; scouts are cheap. Quick mode still scouts.
 
 ## 3. Plan
 Spawn the `harness:planner` subagent with the run directory. It writes `plan.md` and `tasks.json`.
-In quick mode, tell it no scout reports exist and to explore what it needs itself.
+If its reply says the job exceeds 6 tasks, show the user the proposed phases and ask (AskUserQuestion)
+whether to plan phase 1 only (Recommended) or keep everything in one run.
 
 ## 4. Checkpoint (always)
 Show the user the planner's short task list and any open questions (from its reply, not the file).
 Ask with AskUserQuestion: "Approve the plan?" options: "Approve", "Change something", "Abort".
-- Change: collect the feedback, resume the planner (SendMessage) with it, then ask again.
+- Change: collect the feedback, resume the planner (SendMessage) with it, then ask again. After two
+  rounds of changes, spawn a fresh planner told to read the existing plan.md plus the accumulated
+  feedback, instead of resuming (a resumed planner's context keeps growing).
 - Abort: `H run end --status aborted` and stop.
 The user can open `<run_dir>/plan.md` to read it in full; mention the path.
 
@@ -97,13 +100,16 @@ parallel): spawn a `harness:engineer` with the task id, passing `model: opus` wh
   override only changes the model.
 
 After all tasks: run `H gates` (all changed repos). If anything fails, send the failing output's log
-path to an engineer to fix, then rerun.
+path to an engineer to fix, then rerun. After two such fix attempts, ask the user instead of looping.
 
 ## 7. Review loop
 For round n = 1, 2, ...:
-1. `H review --round n`. If it prints `FALLBACK`, spawn the `harness:claude-reviewer` subagent for round n.
+1. `H review --round n`. If it prints `FALLBACK` (also when the outside model's output was unparseable),
+   spawn the `harness:claude-reviewer` subagent for round n; pass `model: sonnet` for rounds 2 and later,
+   where it mainly re-checks known findings.
 2. Spawn the `harness:verifier` subagent for round n. It writes `verified-<n>.json`.
-3. `H verdict --round n` prints `DECISION: DONE | FIX | ESCALATE`.
+3. `H verdict --round n`. If it prints `INVALID`, resume the verifier once (SendMessage) with that message,
+   then rerun. Otherwise it prints `DECISION: DONE | FIX | ESCALATE`.
    - DONE: go to step 8.
    - FIX: spawn a `harness:engineer` with `<run_dir>/fix-<n>.json`. Then `H gates`; continue with round n+1.
    - ESCALATE: tell the user how many confirmed and uncertain-blocking findings remain and where

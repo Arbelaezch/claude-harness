@@ -25,7 +25,7 @@ Write the output file (Markdown, at most ~150 lines) with exactly these sections
 nothing to report, write "None" rather than padding it:
 
 ## Relevant files
-`path:line-range` — one line on what it does and why it matters for this task. Most important first.
+`path:line-range` (always with line numbers) — one line on what it does and why it matters for this task. Most important first.
 
 ## How it works today
 The current flow for the behaviour the task touches, in a few short paragraphs or a numbered flow.
@@ -35,13 +35,17 @@ Patterns this repo uses for this kind of change (API layers and permissions, hoo
 naming, error handling, how API calls are made from the frontend), with one file to copy from.
 
 ## Tests
-Where the related tests live, the test style, and the exact command to run just those tests.
+Where the related tests live, the test style, the exact command to run just those tests, and the
+repo's lint/format/typecheck commands (from package scripts, Makefile or CI config).
 
 ## Cross-repo touchpoints
 Endpoints, payload fields or exported components that other repos or modules depend on.
 
 ## Risks and unknowns
 Anything surprising, fragile, or ambiguous the planner should decide on.
+
+## Not checked
+Areas the task may touch that you did not open, so the planner knows what to verify itself.
 
 Your final reply to the caller is one short paragraph: the output path and the 3 most important findings.
 Do not paste the file contents into your reply.
