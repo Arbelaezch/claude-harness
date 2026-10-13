@@ -78,9 +78,10 @@ which keeps its context small over long runs.
   - **Write account** (`[github] write_accounts`, default `Arbelaezch`, my personal account): commit, push,
     merge, cherry-pick, revert, tag, switch branches, stash, and every PR/issue write (create, merge, edit,
     comment, review). A project pinned to another account is not a write account.
+  - **Any account:** the main session can `fetch` and `pull`; subagents can `fetch` but not `pull`.
   - **Any other account** (e.g. work): only create/switch branches, stash, `gh pr create` and
     `gh issue create`. No commit, push, merge or PR/issue edits.
-  - **Always blocked:** `pull`, history rewrites, force/deleting/mirror pushes, pushes or commits on protected
+  - **Always blocked:** history rewrites, force/deleting/mirror pushes, pushes or commits on protected
     branches, `gh auth switch`, token/host overrides, an unknown gh identity, and deleting repos or issues.
 
   It supports an `uncommitted` mode and a `commit` mode per project; the mode only governs subagents.
