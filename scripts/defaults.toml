@@ -25,6 +25,7 @@ failure_tail_lines = 60
 # ---------------------------------------------------------------------------
 # Git and GitHub policy. Enforced by PreToolUse hooks on every Bash call.
 #
+# `git fetch` is open to everyone; the main session may also `git pull` on any account (subagents may not).
 # Subagents (the /ship engineer etc.) never push, open or edit PRs/issues, or write to GitHub.
 # `[git].mode` is their only git switch:
 #   "uncommitted" - they edit files on a feature branch; no staging, no commits.
@@ -37,7 +38,7 @@ failure_tail_lines = 60
 #   * any other account (e.g. work): only branch create/switch, stash, `gh pr create` and `gh issue create`.
 #     No commit, push, merge, edits or comments.
 # Always blocked, for everyone: force/delete/mirror pushes, pushes to protected branches, commits on protected
-# branches, pull, history rewrites, `gh auth switch`, token/host overrides, an unknown gh identity,
+# branches, history rewrites, `gh auth switch`, token/host overrides, an unknown gh identity,
 # and deleting repos/issues. Pending PR reviews are created only by `harness pr post`.
 # ---------------------------------------------------------------------------
 [github]

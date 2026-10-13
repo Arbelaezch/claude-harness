@@ -785,7 +785,6 @@ def hook_subagent_stop(cfg):
 
 GIT_GLOBAL_OPTS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 ALWAYS_BLOCKED = {
-    "pull": "The harness fetches origin itself at branch time; pulling mid-run would move the code under the agents.",
     "rebase": "Rewriting history is not allowed.",
     "filter-branch": "Rewriting history is not allowed.",
     "clean": "git clean deletes untracked files.",
@@ -800,6 +799,7 @@ SUBAGENT_BLOCKED = {
     "merge": "Merging is not part of the pipeline.",
     "cherry-pick": "Not part of the pipeline.",
     "revert": "Not part of the pipeline.",
+    "pull": "The harness fetches origin itself at branch time; pulling mid-run would move the code under the agents.",
 }
 
 
@@ -850,8 +850,9 @@ def current_branch(path: str | None) -> str | None:
 #     commit/add, push, merge/cherry-pick/revert/tag, and every PR/issue write (create, merge, edit, comment, review...).
 #   * any other account (e.g. work): main session may only create branches, switch branches, stash, and run
 #     `gh pr create` / `gh issue create`. No commit, push, merge or other writes.
+#   * main session may fetch and pull on any account; subagents may fetch but not pull.
 #   * subagents never push or write to GitHub (and only commit in git mode "commit", on a writer account).
-# Always blocked: force/delete/mirror/protected-branch pushes, pull, history rewrites, token/host overrides, an unknown gh
+# Always blocked: force/delete/mirror/protected-branch pushes, history rewrites, token/host overrides, an unknown gh
 # identity (fails closed), `gh auth switch`, and repo/issue deletion.
 GH_ANY_ACCOUNT = {("pr", "create"), ("issue", "create")}
 GH_WRITER_ONLY = (
@@ -1025,6 +1026,8 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
         if sub == "commit" and ("--amend" in args):
             return "`git commit --amend` rewrites history and is blocked."
         if subagent:
+            if sub == "pull":
+                return f"`git pull` is blocked for subagents. {SUBAGENT_BLOCKED['pull']}"
             if sub == "stash":
                 return f"`git stash` is blocked for subagents. {SUBAGENT_BLOCKED['stash']}"
             if sub in GIT_WRITER_ONLY and (mode != "commit" or sub not in ("commit", "add")):
