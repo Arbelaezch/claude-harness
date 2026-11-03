@@ -16,6 +16,5 @@ Show both outputs to the user as-is (they're tables), then add at most four shor
 - agents showing zero or unpriced cost (the model ID has no entry under `[pricing]` in defaults.toml),
 - reviewer precision below ~50% (too many false positives) or many "missed" issues
   (reviewer too weak), and whether to try another provider in .claude/harness.toml,
-- a low engineer first-attempt gate pass rate (plans too vague, or engineer model too weak),
-- low run ratings.
+- a low engineer first-attempt gate pass rate (plans too vague, or engineer model too weak).
 Say when there isn't enough data yet (fewer than ~5 runs) to draw conclusions.

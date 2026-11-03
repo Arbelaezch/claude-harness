@@ -27,7 +27,7 @@ Harness is my answer to that:
   GitHub account, after I've reviewed and asked. PR reviews from the harness go up only as *pending* reviews,
   which I submit myself.
 - **Measured, not vibes.** Every stage logs tokens, cost, duration and outcome. `/harness-report`
-  breaks down cost, quality and speed by stage and model, and I rate each run 1–5.
+  breaks down cost, quality and speed by stage and model.
 
 ## How it works
 
