@@ -59,8 +59,7 @@ commits, offer to re-run the review. Remind the user to open each PR's "Files ch
 submit their pending review (Approve / Request changes / Comment). The choice of verdict is theirs.
 
 ## 5. Finish
-`H run end --status done`. Then ask: "How useful was this review?" options "5 - posted as is",
-"4 - minor edits", "3 - significant edits", "2 - mostly rewrote it". Record with `H rate <score> --note "..."`.
+`H run end --status done`.
 
 ## Rules
 - Never post, comment, approve or request changes any other way in this flow, even though the guard would

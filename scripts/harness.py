@@ -2549,7 +2549,6 @@ def cmd_report(a, cfg):
     for e in events:
         if e.get("kind") == "run_end":
             runs[e["run_id"]] = e
-    ratings = {e["run_id"]: e for e in events if e.get("kind") == "rating"}
     if runs:
         print("\n== Runs ==")
         r_rows = []
@@ -2557,22 +2556,11 @@ def cmd_report(a, cfg):
             run = read_json(RUNS_DIR / rid / "run.json", {})
             r_rows.append([rid[:15], (run.get("task") or "")[:40], run.get("mode", ""), e.get("status"), e.get("review_rounds"),
                            f"${e.get('claude_cost_usd_est', 0):.2f}", f"${e.get('external_cost_usd', 0):.3f}",
-                           f"{(e.get('duration_s') or 0) / 60:.0f}m", (ratings.get(rid) or {}).get("score", "")])
-        print(fmt_table(r_rows, ["run", "task", "mode", "status", "rounds", "claude $*", "outside $", "time", "rating"]))
+                           f"{(e.get('duration_s') or 0) / 60:.0f}m"])
+        print(fmt_table(r_rows, ["run", "task", "mode", "status", "rounds", "claude $*", "outside $", "time"]))
         print("*Claude cost is an API-equivalent estimate; on a Team seat it isn't billed per token.")
     ext = sum(e.get("cost_usd_est") or 0 for e in usage if e.get("billing") == "api")
     print(f"\nActual outside-model spend in window: ${ext:.3f}")
-
-
-def cmd_rate(a, cfg):
-    rid = a.run or current_run_id()
-    if not rid:
-        runs = sorted(p.name for p in RUNS_DIR.iterdir()) if RUNS_DIR.exists() else []
-        rid = runs[-1] if runs else None
-    if not rid:
-        sys.exit("No run to rate.")
-    log_event({"kind": "rating", "run_id": rid, "score": a.score, "note": a.note or ""})
-    print(f"Rated {rid}: {a.score}/5")
 
 
 # --------------------------------------------------------------------------- models
@@ -3029,12 +3017,6 @@ def main(argv=None):
     s.add_argument("--limit", type=int, default=15)
     s.add_argument("--csv", help="export raw events to a CSV file")
     s.set_defaults(fn=cmd_report)
-
-    s = sub.add_parser("rate", help="record your 1-5 rating of a run's result")
-    s.add_argument("score", type=int, choices=range(1, 6))
-    s.add_argument("--note")
-    s.add_argument("--run")
-    s.set_defaults(fn=cmd_rate)
 
     s = sub.add_parser("models", help="list or change agent models")
     s.add_argument("action", nargs="?", choices=["list", "set"], default="list")

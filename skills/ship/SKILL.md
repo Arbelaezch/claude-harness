@@ -125,9 +125,6 @@ For round n = 1, 2, ...:
 3. Tell the user, in a few lines: which branches hold the changes, that nothing is committed (unless
    git mode is "commit"), open should_fix/nit items worth a look, and the run's cost line. On the personal
    account, offer to commit, push and open the PR once they've reviewed; don't do it unprompted.
-4. Ask with AskUserQuestion: "How did this run go?" options "5 - merge as is", "4 - minor edits",
-   "3 - significant edits", "2 - mostly redone" (Other lets them type 1 or a note). Record it with
-   `H rate <score> --note "<note>"`. Skip if they dismiss it.
 
 ## Rules
 - Subagents never commit (unless git mode is "commit"), push, switch branches or stash, and never write to
