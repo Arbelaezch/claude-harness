@@ -153,6 +153,28 @@ whatever account they're signed into, and the session-start hook warns if that d
 </details>
 
 <details>
+<summary><b>Optional: plan-usage check (statusline)</b></summary>
+
+`scripts/usage.py` reports how much of the 5-hour and weekly plan windows is used and returns go, pause
+(with the time to resume) or unknown. It reads a snapshot written by `scripts/statusline_capture.py`, so
+the statusline command has to be set. This is a local setting, not part of the plugin. Add it to
+`~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "python3 ~/code/claude-harness/scripts/statusline_capture.py"
+}
+```
+
+(Use the full path if `~` is not expanded.) The snapshot is saved to `~/.claude/statusline-latest.json` and
+only updates while a Claude Code session is open. When it is missing or older than 5 minutes,
+`usage.py` takes a fresh reading with a one-turn headless run instead. It reports the account the
+terminal is logged in to. Run `python3 scripts/usage.py` (exit code 0 go, 10 pause, 2 unknown;
+`--json` for details). See [`docs/factory-design.md`](docs/factory-design.md) for how it fits the planned factory.
+</details>
+
+<details>
 <summary><b>Per-project config: <code>.claude/harness.toml</code></b></summary>
 
 - `[project]`: `name`, `description`, `review_focus` (checks that reviewers make on every review).
@@ -175,7 +197,8 @@ Run state and metrics live in `.harness/` in the project, which is excluded from
 agents/           subagent definitions: scout, planner, engineer, claude-reviewer, verifier
 skills/           slash commands: /ship, /review-pr, /harness-init, /harness-report
 hooks/hooks.json  git guard, per-agent metrics, account check
-scripts/          harness.py (CLI), defaults.toml, claude-accounts.sh
+scripts/          harness.py (CLI), defaults.toml, claude-accounts.sh, usage.py, statusline_capture.py
+docs/             factory-design.md (planned factory layer)
 ```
 
 ## Author
