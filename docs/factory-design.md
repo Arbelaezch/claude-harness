@@ -297,14 +297,16 @@ marker with the wrong directory, and a subagent without push rights.
 - Smart blocker summarising beyond the standard format.
 - Retrying failed harness runs.
 
-## 14. Rename steps (do last, before building)
+## 14. Rename (done 2026/11/06)
 
-1. Rename the GitHub repo to `software-factory` and run `git remote set-url origin git@github-personal:Arbelaezch/software-factory.git`.
-2. Move the folder to `~/code/software-factory`.
-3. Update the three absolute paths in `~/.claude/settings.json`: marketplace path, guard hook, statusline script.
-4. Keep the plugin name `harness` so `/ship` and the `harness:` agent prefix are unchanged.
-5. Check `scripts/claude-accounts.sh` and the README for the old name.
-6. Session history under the old folder name will not carry over.
+The repo was renamed from `claude-harness` to `software-factory` (GitHub repo, remote URL, folder
+`~/code/software-factory`). Places that held the old name or path were updated: `~/.claude/settings.json`
+(marketplace path, guard hook, statusline), the plugin registry, `~/.zshrc`, the personal account config
+in `~/.claude-personal`, the README and `scripts/claude-accounts.sh`.
+
+- The plugin name stays `harness`, so `/ship` and the `harness:` agent prefix are unchanged.
+- Session history under the old folder name does not carry over.
+- Issues and PRs created before the rename keep working through GitHub's redirect.
 
 ## 15. Open items
 
