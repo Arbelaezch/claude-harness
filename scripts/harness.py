@@ -481,7 +481,7 @@ def slug_of(cfg: dict, rname: str) -> str:
     return sl
 
 
-LABEL_TYPES = [("hotfix", "hotfix"), ("bug", "bug"), ("fix", "fix"), ("ui", "ui"), ("design", "ui"),
+LABEL_TYPES = [("hotfix", "hotfix"), ("bug", "fix"), ("fix", "fix"), ("ui", "feat"), ("design", "feat"),
                ("enhancement", "feat"), ("feature", "feat")]
 
 
