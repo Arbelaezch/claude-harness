@@ -74,8 +74,8 @@ The user can open `<run_dir>/plan.md` to read it in full; mention the path.
 Read `repos` from `<run_dir>/tasks.json` (small file, fine to read). Run
 `H branch --repos <comma-separated repos> [--type <type>]`. It fetches origin and creates the branch
 from a fresh `origin/<base branch>` with the configured naming, e.g. `feat/193-add-export` (type
-defaults to `suggested_branch_type`; use `--type fix`, `bug`, `ui`, ... when the issue clearly calls for
-it). The user's own branches and their local base branch are never touched.
+defaults to `suggested_branch_type`; use `--type fix`, `chore` or `hotfix` when the issue clearly calls for
+it; the only allowed types are `feat`, `fix`, `chore`, `hotfix`). The user's own branches and their local base branch are never touched.
 - If a repo has uncommitted tracked changes, tell the user and ask whether to carry them over
   (`--allow-dirty`) or stop so they can commit/stash first. Never stash or reset their work yourself.
 - If it reports DEPENDENCIES CHANGED, ask the user to reinstall (e.g. `npm install`, `pip install -r
