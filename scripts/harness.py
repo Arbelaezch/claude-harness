@@ -925,12 +925,15 @@ def factory_context(payload: dict) -> dict | None:
     marker = load_marker(payload.get("cwd"), scoped=False)
     if not marker:
         return None
-    agent = payload.get("agent_type") or (marker.get("role") if marker.get("role") != "manager" else None)
+    agent = (payload.get("agent_type") if payload.get("agent_id") else None) or \
+        (marker.get("role") if marker.get("role") != "manager" else None)
     return {"marker": marker, "agent_type": agent or None, "cwd": payload.get("cwd")}
 
 
 def is_subagent(payload: dict, factory: dict | None) -> bool:
-    return bool(factory["agent_type"]) if factory else bool(payload.get("agent_type"))
+    """Hook payloads from a subagent carry `agent_id` (and `agent_type`); a main session started with `--agent`
+    carries only `agent_type`, and a plain main session neither (checked against Claude Code 2.1.311)."""
+    return bool(factory["agent_type"]) if factory else bool(payload.get("agent_id"))
 
 
 def marker_tamper_denial(payload: dict, factory: dict | None) -> str | None:

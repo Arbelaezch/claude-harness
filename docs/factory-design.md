@@ -290,6 +290,10 @@ This boundary must always hold.
   `manager` is held to that role's rules like a subagent (it has no `agent_type`, so the guard uses the marker
   role), even outside the project. `ci-fixer` may also add and commit on its `pr_branch`, since its fix has to be
   committed before it pushes.
+- Subagent detection uses `agent_id`, not `agent_type`. Checked against Claude Code 2.1.311: a main session has
+  neither field, a Task subagent (including plugin ones like `harness:scout`) has both, and a main session started
+  with `--agent` has `agent_type` only. Keying on `agent_type` would have treated a `--agent` manager as a subagent.
+  Nested subagents were not tested.
 - In factory mode the guard denies Bash, Write, Edit and notebook calls that mention or reach `~/.software-factory`.
   That is best effort against a process running as the same user. The real barrier is a `permissions.deny` rule in
   user settings for `Write`/`Edit` on `~/.software-factory/**`; add it when the launcher ships.
@@ -343,6 +347,4 @@ in `~/.claude-personal`, the README and `scripts/claude-accounts.sh`.
 - Phone push notifications do not arrive (section 7, "Phone access"). Revisit when fixed.
 - Wire the launcher into the run loop: the manager session and the per-role worker sessions still need to be started with `harness factory launch`.
 - `ci-fixer` is meant to comment on the PR, but `gh pr comment` is blocked for subagents and worker sessions.
-- The hooks treat a missing `agent_type` as the main session and a main session run with `--agent` as a
-  subagent. Check the payload for both before relying on it.
 - Confirm what the usage probe reports when I am near or over a limit (the `status` field values are unseen).
