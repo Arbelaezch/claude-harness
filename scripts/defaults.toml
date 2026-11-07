@@ -157,3 +157,10 @@ long_context_threshold = 100000
 long_input = 0.50
 long_output = 2.50
 long_cache_read = 0.05
+
+# Factory run loop (docs/factory-design.md section 9); override in a project's .claude/harness.toml.
+[factory]
+max_five_hour = 80      # pause at this % of the 5-hour usage window
+max_weekly = 90         # pause at this % of the weekly window
+unknown_limit = 3       # unreadable usage this many times in a row stops the factory
+claude_args = ["--permission-mode", "acceptEdits"]   # passed to every headless session the factory starts

@@ -3174,7 +3174,7 @@ def prune_markers() -> int:
     return removed
 
 
-def run_factory(project: str, role: str, fields: dict, command: list[str]) -> int:
+def run_factory(project: str, role: str, fields: dict, command: list[str], output=None) -> int:
     """Run `command` in `project` with factory mode on; the marker lives exactly as long as the command."""
     prune_markers()
     nonce, path = write_marker(project, role, fields)
@@ -3186,7 +3186,8 @@ def run_factory(project: str, role: str, fields: dict, command: list[str]) -> in
 
     old = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        child = subprocess.Popen(command, cwd=project, env={**os.environ, MARKER_ENV: nonce})
+        child = subprocess.Popen(command, cwd=project, env={**os.environ, MARKER_ENV: nonce}, stdout=output,
+                                 stderr=subprocess.STDOUT if output else None, stdin=subprocess.DEVNULL if output else None)
         return child.wait()
     finally:
         for sig, handler in old.items():
@@ -3476,6 +3477,137 @@ def cmd_factory_issues_create(a, cfg):
         print(f"created  #{numbers[key]}  {title}")
 
 
+# Factory run loop wiring (engine in scripts/factory_loop.py; design section 9).
+ISSUE_PROMPT = "/factory-issue {n}"
+SELECTOR_AGENT = "harness:issue-selector"
+
+
+def factory_modules():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import factory_loop
+    import usage
+    return factory_loop, usage
+
+
+def issue_labels(slug: str, n: int) -> set[str]:
+    data = gh_json("issue", "view", str(n), "--repo", slug, "--json", "labels") or {}
+    return {x["name"] for x in data.get("labels") or []}
+
+
+def set_issue_state(slug: str, n: int, state: str) -> None:
+    """Move an issue to one factory state label, removing the others."""
+    ensure_labels(slug, {state})
+    cur = issue_labels(slug, n)
+    args = ["issue", "edit", str(n), "--repo", slug]
+    drop = sorted((cur & set(FACTORY_LABELS)) - {state})
+    if state not in cur:
+        args += ["--add-label", state]
+    if drop:
+        args += ["--remove-label", ",".join(drop)]
+    if len(args) > 5:  # something to add or remove
+        gh(*args)
+
+
+def factory_comment(slug: str, n: int, text: str) -> None:
+    gh("issue", "comment", str(n), "--repo", slug, "--body-file", "-", input_text=text)
+
+
+def claude_command(*args: str) -> list[str]:
+    return [os.environ.get("HARNESS_CLAUDE", "claude"), *args]
+
+
+def cmd_factory_pool(a, cfg):
+    fl, _ = factory_modules()
+    slug = factory_repo(a, cfg)
+    pool = fl.compute_pool(gh_json("issue", "list", "--repo", slug, "--state", "all", "--limit", "500",
+                                   "--json", "number,title,body,labels,state") or [])
+    print(json.dumps(pool, indent=2))
+
+
+def cmd_factory_queue(a, cfg):
+    """The user names the issues to work on: label them `todo`."""
+    slug = factory_repo(a, cfg)
+    for n in a.numbers:
+        set_issue_state(slug, n, "todo")
+        factory_log({"kind": "queued", "issue": n})
+        print(f"#{n} is in the pool")
+
+
+def factory_raise_blocker(cfg, slug, kind, issue, situation, need, options=None, recommended=None, detail=""):
+    project = (cfg.get("project") or {}).get("name") or ROOT.name
+    text = format_message(kind, project, issue if issue is not None else "", situation, need, options, recommended, detail)
+    notify(text)
+    if issue is not None and slug:
+        factory_comment(slug, issue, f"```\n{text}\n```")
+    factory_log({"kind": "message", "message_kind": kind, "issue": issue})
+
+
+def cmd_factory_block(a, cfg):
+    """Called by a factory session that can't continue: label the issue blocked and tell the user."""
+    slug = factory_repo(a, cfg)
+    try:
+        format_message(a.kind, "x", a.issue, a.situation, a.need or "", a.option, a.recommend, a.detail or "")
+    except ValueError as exc:
+        sys.exit(f"block: {exc}")
+    set_issue_state(slug, a.issue, "blocked")
+    factory_raise_blocker(cfg, slug, a.kind, a.issue, a.situation, a.need or "", a.option, a.recommend, a.detail or "")
+
+
+def cmd_factory_done(a, cfg):
+    """Called by a factory session whose PR is open: label the issue awaiting-merge and say so."""
+    slug = factory_repo(a, cfg)
+    set_issue_state(slug, a.issue, "awaiting-merge")
+    factory_raise_blocker(cfg, slug, "DONE", a.issue, a.note or f"The PR is open: {a.pr}", "", detail=a.pr)
+
+
+def cmd_factory_run(a, cfg):
+    fl, usage = factory_modules()
+    if a.merge != "manual":
+        sys.exit("only --merge manual exists so far; auto-merge is build step 6")
+    slug = factory_repo(a, cfg)
+    fc = cfg.get("factory") or {}
+
+    def fetch():
+        return gh_json("issue", "list", "--repo", slug, "--state", "all", "--limit", "500",
+                       "--json", "number,title,body,labels,state") or []
+
+    if a.dry_run:  # read-only: no labels created, nothing queued
+        pool = fl.compute_pool(fetch())
+        print(f"{len(pool)} issue(s) could run now: " + (", ".join(f"#{p['number']} {p['title']}" for p in pool) or "none"))
+        return
+    ensure_labels(slug, set(FACTORY_LABELS))
+    for n in a.issues or []:
+        set_issue_state(slug, n, "todo")
+        factory_log({"kind": "queued", "issue": n})
+
+    sessions = ROOT / ".factory" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    claude_args = fc.get("claude_args", ["--permission-mode", "acceptEdits"])
+    limits = {"five_hour": float(fc.get("max_five_hour", 80)), "seven_day": float(fc.get("max_weekly", 90))}
+
+    def ask_selector(pool):
+        r = run_cmd(claude_command("-p", "Pick the next issue. Candidates:\n" + json.dumps(pool, indent=1),
+                                   "--agent", SELECTOR_AGENT, *claude_args), cwd=str(ROOT), timeout=300)
+        return r.stdout
+
+    def run_issue(n):
+        with open(sessions / f"issue-{n}-{int(time.time())}.log", "w", encoding="utf-8") as out:
+            return run_factory(str(ROOT), "manager", {}, claude_command("-p", ISSUE_PROMPT.format(n=n), *claude_args), out)
+
+    summary = fl.run_loop(
+        gate=lambda: fl.usage_gate(lambda: usage.check(limits), log=factory_log,
+                                   max_unknown=int(fc.get("unknown_limit", 3))),
+        fetch_issues=fetch, select=lambda pool: fl.choose(pool, ask_selector),
+        set_state=lambda n, st: set_issue_state(slug, n, st), run_issue=run_issue,
+        fetch_labels=lambda n: issue_labels(slug, n),
+        raise_blocker=lambda text, issue, need: factory_raise_blocker(cfg, slug, "BLOCKER", issue, text, need),
+        log=factory_log, max_issues=a.max_issues)
+    for r in summary["results"]:
+        print(f"#{r['issue']}: {r['outcome']}")
+    print(f"{len(summary['results'])} issue(s) run" + (f"; stopped: {summary['stopped']}" if summary["stopped"] else ""))
+    factory_log({"kind": "run_finished", **summary})
+
+
 def cmd_account(a, cfg):
     """Prints '<account>|<config dir>' for the project at the current directory (dir empty = default
     ~/.claude). Prints nothing outside harness projects. Used by scripts/claude-accounts.sh."""
@@ -3754,6 +3886,36 @@ def main(argv=None):
     f.add_argument("--repo", help="repo name from .claude/harness.toml (default: the only repo)")
     f.add_argument("--dry-run", action="store_true")
     f.set_defaults(fn=cmd_factory_issues_create)
+    f = fsub.add_parser("pool", help="print the issues that could run now (open, todo, dependencies closed)")
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_pool)
+    f = fsub.add_parser("queue", help="label the named issues `todo`: they are the ones the factory may run")
+    f.add_argument("numbers", type=int, nargs="+")
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_queue)
+    f = fsub.add_parser("run", help="run the factory loop: one fresh headless session per issue")
+    f.add_argument("--issues", type=lambda t: [int(x) for x in t.split(",") if x], help="comma-separated; queued as `todo` first")
+    f.add_argument("--max-issues", type=int, default=20)
+    f.add_argument("--merge", choices=["manual", "auto"], default="manual")
+    f.add_argument("--dry-run", action="store_true", help="only show what could run")
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_run)
+    f = fsub.add_parser("block", help="(used by factory sessions) label an issue blocked and tell the user")
+    f.add_argument("issue", type=int)
+    f.add_argument("--kind", choices=["BLOCKER", "QUESTION"], default="BLOCKER", type=str.upper)
+    f.add_argument("--situation", required=True)
+    f.add_argument("--need", required=True)
+    f.add_argument("--option", action="append")
+    f.add_argument("--recommend", type=int)
+    f.add_argument("--detail")
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_block)
+    f = fsub.add_parser("done", help="(used by factory sessions) label an issue awaiting-merge once its PR is open")
+    f.add_argument("issue", type=int)
+    f.add_argument("--pr", required=True, help="PR URL")
+    f.add_argument("--note")
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_done)
     f = fsub.add_parser("decide", help="record a settled question in .factory/decisions.md")
     f.add_argument("--question", required=True)
     f.add_argument("--answer", required=True)
