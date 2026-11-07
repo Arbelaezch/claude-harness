@@ -71,7 +71,7 @@ The factory takes a project path as an argument. One factory run handles one pro
 | `verifier` | Checks reviewer findings against the code | exists |
 | `mvp-reviewer` | Checks the MVP, vision and design docs are clear and complete enough to answer builders' questions | exists |
 | `factory-planner` | Drafts issues with acceptance criteria and dependencies from the clarified docs (`/factory-plan`) | exists |
-| `issue-selector` | Picks the next issue from the `todo` pool | new |
+| `issue-selector` | Picks the next issue from the `todo` pool | exists |
 | `question-resolver` | Answers a question from the source docs, or decides it needs me (section 6) | new |
 | `human-liaison` | Sits between the factory and me for every question and blocker (section 7) | exists |
 | `ci-fixer` | Diagnoses a failed CI run, comments on the PR, attempts one fix | new |
@@ -259,6 +259,30 @@ loop:
   at end of group: harness-cleanup (section 10)
 ```
 
+How it is built (step 5, decided 2026/11/06)
+- The loop is a small Python supervisor, `harness factory run [--issues 12,13] [--max-issues N] [--merge manual]`
+  (engine in `scripts/factory_loop.py`, side effects injected). It spends no tokens: it checks usage, computes the
+  pool, asks `issue-selector` for the order, and starts one fresh headless session per issue with
+  `claude -p "/factory-issue N"` under its own factory marker. A long-lived manager session would grow its context
+  across issues; this way each issue's context ends with the issue, and the interactive manager from section 7
+  stays optional.
+- All state is issue labels plus `.factory/log.jsonl`, so restarting the command resumes. An issue still labelled
+  `in-progress` at start is an orphan from a crash: it becomes `blocked` and is raised to me, never guessed at.
+- The pool is open issues labelled `todo` with every `Depends on #N` issue closed. I name the issues
+  (`--issues` or `harness factory queue N...`); creation never queues anything. Merged PRs close their issues via
+  `Closes #N`, so dependencies unlock on merge, not on PR open.
+- `/factory-issue` follows `/ship` (the single source for the pipeline) with the human steps removed: no grill and
+  no plan checkpoint, since the documents and `.factory/decisions.md` were settled earlier. It never asks. Where
+  /ship asks me, it checks the decisions file, and otherwise runs `harness factory block N` (label `blocked`, comment
+  on the issue, message through `notify`) and stops. When the review verdict is DONE it commits the diff, pushes
+  the branch, opens the PR from the draft and runs `harness factory done N --pr URL` (label `awaiting-merge`).
+  A session that ends in neither state is marked `blocked` by the supervisor.
+- Questions are asynchronous: they arrive on the terminal, I answer with `harness factory decide` and relabel the
+  issue `todo`. Replying live from the phone needs the interactive manager and the push fix, and is not part of v1.
+- Merging stays manual. `--merge auto` is refused until step 6.
+- Tunables are in `[factory]` in `scripts/defaults.toml` (usage limits, the unknown-reading limit, and the
+  `claude_args` passed to each headless session; it defaults to `--permission-mode acceptEdits`).
+
 Usage gate
 - Uses `scripts/usage.py`. Defaults: pause at 80% of the 5-hour window and 90% of the weekly window.
 - Checked before every harness launch, and inside a run from the `rate_limit_event` in its stream output.
@@ -340,7 +364,7 @@ marker with the wrong directory, and a subagent without push rights.
 2. Factory-mode guard with tests. Nothing else is safe without it.
 3. `notify()` with the terminal channel, and `human-liaison` with the standard format. (done)
 4. `factory-planner` and issue creation from an MVP doc, with my approval of the issue list. (done)
-5. Run loop with `issue-selector`, the ship recipe, manual merge, and the usage gate with pause and resume.
+5. Run loop with `issue-selector`, the ship recipe, manual merge, and the usage gate with pause and resume. (done; not yet run on a real project)
 6. Auto-merge, CI wait, `ci-fix` recipe.
 7. `question-resolver`, `conflict-resolve`, `harness-cleanup`.
 8. Push notification channel.
