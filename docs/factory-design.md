@@ -279,6 +279,11 @@ This boundary must always hold.
   `--abort`) into `pr_branch` and may add/commit there, so it never rebases or force-pushes. It never skips the account check (a work-account session is
   still denied), and never lifts force/delete pushes, protected branches, `--amend`, rebase, token/host overrides
   or gh account switching. The manager's own powers are unchanged: they already come from the main-session rules.
+- The launcher is `harness factory launch [--role manager|engineer|ci-fixer|conflict-resolver] [--issue-branch B]
+  [--pr-branch B] [--base-branch B] [-- <command...>]` (default command: `claude`). It refuses professional
+  harnesses and roles missing their branch fields, writes the marker with this process's pid, runs the command in
+  the project root with the nonce exported, forwards signals, and deletes the marker on exit. Every launch first
+  prunes stale markers; `harness factory cleanup` does only that.
 - In factory mode the guard denies Bash, Write, Edit and notebook calls that mention or reach `~/.software-factory`.
   That is best effort against a process running as the same user. The real barrier is a `permissions.deny` rule in
   user settings for `Write`/`Edit` on `~/.software-factory/**`; add it when the launcher ships.
@@ -330,7 +335,7 @@ in `~/.claude-personal`, the README and `scripts/claude-accounts.sh`.
 ## 15. Open items
 
 - Phone push notifications do not arrive (section 7, "Phone access"). Revisit when fixed.
-- Build the launcher half of the marker (write/delete the file, export the nonce). The guard side is done.
+- Wire the launcher into the run loop: the manager session and the per-role worker sessions still need to be started with `harness factory launch` (see issue #15 for the per-worker design).
 - Per-worker `pr_branch`/`issue_branch` cannot be written by a launcher for Task subagents. Either launch
   workers as separate sessions with their own marker, or give each worker a worktree and derive the branch there.
 - The hooks treat a missing `agent_type` as the main session and a main session run with `--agent` as a
