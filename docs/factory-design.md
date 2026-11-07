@@ -279,7 +279,11 @@ This boundary must always hold.
   `--abort`) into `pr_branch` and may add/commit there, so it never rebases or force-pushes. It never skips the account check (a work-account session is
   still denied), and never lifts force/delete pushes, protected branches, `--amend`, rebase, token/host overrides
   or gh account switching. The manager's own powers are unchanged: they already come from the main-session rules.
-- The guard denies Bash and Write/Edit calls that touch `~/.software-factory/markers/`.
+- In factory mode the guard denies Bash, Write, Edit and notebook calls that mention or reach `~/.software-factory`.
+  That is best effort against a process running as the same user. The real barrier is a `permissions.deny` rule in
+  user settings for `Write`/`Edit` on `~/.software-factory/**`; add it when the launcher ships.
+- In factory mode a subagent may not use `git -c`, `--git-dir` or `--work-tree`, or write `git config`, since those
+  can redirect a push to another repo or URL.
 - The guard defaults to deny. Without the marker, or outside that directory, behaviour is today's.
 - Factory-mode permissions are per role (section 4), not blanket. Merges and PR creation belong to the
   factory manager.

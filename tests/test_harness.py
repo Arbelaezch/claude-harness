@@ -1,6 +1,9 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -40,6 +43,7 @@ class HarnessTests(unittest.TestCase):
         self.assertNotIn('"questions"', h.review_system_prompt({"mode": "ship"}, {}))
 
 
+REAL_CURRENT_BRANCH = h.current_branch
 NONCE = "a" * 32
 CFG = {"git": {"mode": "uncommitted", "protected_branches": ["main"]}, "github": {"write_accounts": ["me"]}}
 
@@ -179,10 +183,53 @@ class FactoryGuardTests(unittest.TestCase):
         self.marker()
         self.assertIn("blocked for subagents", self.bash("gh pr merge 3", "harness:ci-fixer"))
 
+    def hook(self, fn, tool_input, agent=None, cwd=None):
+        payload = json.dumps({"cwd": cwd or self.project, "agent_type": agent, "tool_input": tool_input})
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(payload)), contextlib.redirect_stdout(out), \
+                mock.patch.object(h, "log_event", lambda e: None):
+            fn(CFG)
+        return json.loads(out.getvalue()) if out.getvalue() else None
+
     def test_marker_files_are_off_limits(self):
-        self.assertIsNotNone(h.marker_tamper_denial(f"echo x > {self.home}/.software-factory/markers/a.json", None, None))
-        self.assertIsNotNone(h.marker_tamper_denial("", str(h.marker_dir() / "a.json"), self.project))
-        self.assertIsNone(h.marker_tamper_denial("ls", "a.py", self.project))
+        self.marker()
+        for tool_input in ({"command": f"echo x > {self.home}/.software-factory/markers/a.json"},
+                           {"command": "cd ~/.software-factory && echo x > markers/a.json"},
+                           {"file_path": str(h.marker_dir() / "a.json")},
+                           {"notebook_path": str(h.marker_dir() / "a.ipynb")}):
+            for fn in (h.hook_guard_bash, h.hook_guard_github):
+                for agent in (None, "harness:engineer"):
+                    out = self.hook(fn, tool_input, agent)
+                    self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny", (tool_input, fn, agent))
+        self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "ls", "file_path": "a.py"}))
+
+    def test_no_marker_leaves_dot_dir_alone(self):
+        self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "ls ~/.software-factory"}))
+
+    def test_git_redirection_blocked_for_factory_subagents(self):
+        self.marker()
+        other = os.path.join(self.home, "p", "app2")
+        for cmd in (f"git --git-dir={other}/.git push origin feat/x", f"git --git-dir {other}/.git push",
+                    "git --work-tree=/x push origin feat/x", "git -c remote.origin.pushurl=u push origin feat/x",
+                    "git config remote.origin.pushurl u", "git config url.u.insteadOf v"):
+            self.assertIsNotNone(self.bash(cmd), cmd)
+            self.assertIsNotNone(h.check_github_global(cmd, CFG, self.project, True, self.ctx("harness:ci-fixer")), cmd)
+        self.assertIsNone(self.bash(f"git -C {self.project} push origin feat/x"))
+        self.assertIsNone(self.bash("git config --get remote.origin.url"))
+
+    def test_hooks_with_a_real_repo(self):
+        self.marker()
+        subprocess.run(["git", "init", "-q", "-b", "feat/x", self.project], check=True)
+        with mock.patch.object(h, "current_branch", REAL_CURRENT_BRANCH):
+            denied = lambda fn, cmd, agent: (self.hook(fn, {"command": cmd}, agent) or {}).get(
+                "hookSpecificOutput", {}).get("permissionDecision") == "deny"
+            for fn in (h.hook_guard_bash, h.hook_guard_github):
+                self.assertFalse(denied(fn, "git push origin feat/x", "harness:ci-fixer"), fn)
+                self.assertTrue(denied(fn, "git push origin feat/x", "harness:scout"), fn)
+                self.assertTrue(denied(fn, "git push origin other", "harness:ci-fixer"), fn)
+            subprocess.run(["git", "-C", self.project, "checkout", "-q", "-b", "other"], check=True)
+            self.assertTrue(denied(h.hook_guard_bash, "git push", "harness:ci-fixer"))
+            self.assertFalse(denied(h.hook_guard_bash, "git push", None))  # the main session is not a factory subagent
 
 
 if __name__ == "__main__":

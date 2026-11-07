@@ -923,11 +923,31 @@ def factory_context(payload: dict) -> dict | None:
     return {"marker": marker, "agent_type": payload.get("agent_type") or None, "cwd": payload.get("cwd")}
 
 
-def marker_tamper_denial(command: str, file_path: str | None, cwd: str | None) -> str | None:
-    """Nobody but the launcher touches factory markers."""
-    hit = "software-factory/markers" in command.replace("\\", "/") or \
-        bool(file_path and within(os.path.join(cwd or ".", file_path), str(marker_dir())))
+def marker_tamper_denial(payload: dict, factory: dict | None) -> str | None:
+    """In factory mode nobody but the launcher touches ~/.software-factory (markers live there)."""
+    if not factory:
+        return None
+    ti = payload.get("tool_input") or {}
+    cwd = payload.get("cwd")
+    root = str(marker_dir().parent)
+    hit = ".software-factory" in (ti.get("command") or "").replace("\\", "/") or any(
+        within(os.path.join(cwd or ".", ti[k]), root) for k in ("file_path", "notebook_path") if ti.get(k))
     return "Factory marker files are managed by the launcher only." if hit else None
+
+
+GIT_CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope")
+
+
+def factory_git_denial(toks: list[str], sub: str, args: list[str]) -> str | None:
+    """In factory mode a subagent may not redirect git (other repo, config overrides, remote rewrites)."""
+    i = 1
+    while i < len(toks) and toks[i].startswith("-"):
+        if toks[i] != "-C":
+            return f"`git {toks[i]}` is blocked for subagents in factory mode: it can point git at another repo or config."
+        i += 2
+    if sub == "config" and not any(a in GIT_CONFIG_READS for a in args):
+        return "`git config` writes are blocked for subagents in factory mode."
+    return None
 
 
 def factory_push_ok(args: list[str], target: str | None, factory: dict) -> bool:
@@ -1119,6 +1139,10 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
         if not sub:
             continue
         target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
+        if factory and subagent:
+            denial = factory_git_denial(toks, sub, args)
+            if denial:
+                return denial
         if sub == "remote" and args and args[0] in ("add", "remove", "rm", "rename", "set-url", "set-head"):
             return "Changing git remotes is blocked."
         if sub == "push":
@@ -1176,6 +1200,10 @@ def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagen
             workdir = toks[1] if os.path.isabs(toks[1]) else os.path.join(workdir or ".", toks[1])
             continue
         sub, args, cdir = git_parts(toks)
+        if sub and factory and subagent:
+            denial = factory_git_denial(toks, sub, args)
+            if denial:
+                return denial
         if sub == "push":
             target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
             denial = push_denial(command, args, cfg, target, subagent, factory)
@@ -1195,8 +1223,9 @@ def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagen
 def hook_guard_github(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
-    reason = check_github_global(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")),
-                                 factory=factory_context(payload))
+    factory = factory_context(payload)
+    reason = marker_tamper_denial(payload, factory) or \
+        check_github_global(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")), factory=factory)
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -1205,11 +1234,10 @@ def hook_guard_github(cfg):
 
 def hook_guard_bash(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
-    ti = payload.get("tool_input") or {}
-    cmd = ti.get("command", "")
-    reason = marker_tamper_denial(cmd, ti.get("file_path"), payload.get("cwd")) or \
-        check_bash(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")),
-                   factory=factory_context(payload))
+    cmd = (payload.get("tool_input") or {}).get("command", "")
+    factory = factory_context(payload)
+    reason = marker_tamper_denial(payload, factory) or \
+        check_bash(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")), factory=factory)
     if reason:
         log_event({"kind": "guard_block", "run_id": current_run_id(),
                    "stage": (payload.get("agent_type") or "manager").split(":")[-1], "command": cmd[:300], "reason": reason})
