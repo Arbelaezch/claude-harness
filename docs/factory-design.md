@@ -181,6 +181,11 @@ Delivery goes through one function, `notify(message)`, with channels behind it.
 - `push`: off by default, switchable per run and mid-session. Not built in v1, scaffolding only. See
   "Phone access" below for why.
 - Adding a channel means adding one class. Nothing else changes.
+- Built: `harness notify --kind question|blocker|done --issue N --situation ... [--need ...] [--option ...
+  --recommend N] [--detail ...] [--channel terminal|push]`. It rejects a message that breaks the format (more than
+  3 sentences, no decision for a QUESTION or BLOCKER, not 2 or 3 options with exactly one recommended). A failing
+  channel never loses the message: the terminal always gets it. The `human-liaison` agent (haiku) builds the
+  message from the raw material and calls this. Batching of questions belongs to the run loop (step 5).
 
 Phone access (status 2026/11/06)
 - The manager is meant to run as a long-lived interactive session started with `claude --remote-control`.
@@ -317,7 +322,7 @@ marker with the wrong directory, and a subagent without push rights.
 
 1. Rename the repo and fix paths (section 14).
 2. Factory-mode guard with tests. Nothing else is safe without it.
-3. `notify()` with the terminal channel, and `human-liaison` with the standard format.
+3. `notify()` with the terminal channel, and `human-liaison` with the standard format. (done)
 4. `factory-planner` and issue creation from an MVP doc, with my approval of the issue list.
 5. Run loop with `issue-selector`, the ship recipe, manual merge, and the usage gate with pause and resume.
 6. Auto-merge, CI wait, `ci-fix` recipe.

@@ -3209,6 +3209,101 @@ def cmd_factory(a, cfg):
     sys.exit(run_factory(str(ROOT), a.role, fields, command or ["claude"]))
 
 
+# Talking to the user (docs/factory-design.md section 7). Every message from the factory has one shape; delivery goes
+# through notify(), with channels behind it. Adding a channel means adding one class and registering it.
+MESSAGE_KINDS = ("QUESTION", "BLOCKER", "DONE")
+
+
+def count_sentences(text: str) -> int:
+    return len([x for x in re.split(r"(?<=[.!?])\s+", text.strip()) if x])
+
+
+def format_message(kind: str, project: str, issue: str | int, situation: str, need: str = "",
+                   options: list[str] | None = None, recommended: int | None = None, detail: str = "") -> str:
+    """The standard message. `recommended` is the 1-based option to mark. Raises ValueError on a message that
+    breaks the format (so a vague or oversized message fails loudly instead of reaching the user)."""
+    kind = kind.upper()
+    options = [o.strip() for o in (options or []) if o.strip()]
+    if kind not in MESSAGE_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(MESSAGE_KINDS)}")
+    if not situation.strip() or count_sentences(situation) > 3:
+        raise ValueError("'What is going on' must be 1 to 3 sentences")
+    if kind != "DONE" and not need.strip():
+        raise ValueError("'What I need' is required for a QUESTION or BLOCKER: one specific decision or action")
+    if "\n" in need.strip():
+        raise ValueError("'What I need' must be one decision or action, on one line")
+    if kind == "DONE" and options:
+        raise ValueError("a DONE message has no options")
+    if options:
+        if not 2 <= len(options) <= 3:
+            raise ValueError("give 2 or 3 options, or none")
+        if recommended is None or not 1 <= recommended <= len(options):
+            raise ValueError("mark exactly one option as recommended (1-based)")
+    elif recommended is not None:
+        raise ValueError("--recommend needs options")
+    ref = str(issue).lstrip("#")
+    lines = [f"[{kind}]  {project} #{ref}" if ref else f"[{kind}]  {project}",
+             f"What is going on:   {' '.join(situation.split())}",
+             f"What I need:        {' '.join(need.split()) or 'Nothing, for your information.'}"]
+    if options:
+        lines.append("Options:")
+        lines += [f"  {i}. {o}{'  (recommended)' if i == recommended else ''}" for i, o in enumerate(options, 1)]
+    if detail.strip():
+        lines.append(f"Detail:             {detail.strip()}")
+    return "\n".join(lines)
+
+
+class Channel:
+    name = ""
+
+    def send(self, text: str) -> None:
+        raise NotImplementedError
+
+
+class TerminalChannel(Channel):
+    name = "terminal"
+
+    def send(self, text: str) -> None:
+        print(f"\n{text}\n", flush=True)
+
+
+class PushChannel(Channel):
+    """Scaffolding only (design section 7, 'Phone access'): phone push does not arrive yet."""
+    name = "push"
+
+    def send(self, text: str) -> None:
+        raise NotImplementedError("the push channel is not built yet; use terminal")
+
+
+CHANNELS: dict[str, type[Channel]] = {c.name: c for c in (TerminalChannel, PushChannel)}
+
+
+def notify(text: str, channels: tuple[str, ...] = ("terminal",)) -> None:
+    """Deliver a formatted message on each channel. A channel that fails never hides the message: the terminal
+    always gets it too."""
+    sent_terminal = False
+    for name in channels:
+        if name not in CHANNELS:
+            raise ValueError(f"unknown channel '{name}' (have: {', '.join(CHANNELS)})")
+        try:
+            CHANNELS[name]().send(text)
+            sent_terminal = sent_terminal or name == "terminal"
+        except NotImplementedError as exc:
+            print(f"[notify] {exc}", file=sys.stderr)
+    if not sent_terminal:
+        TerminalChannel().send(text)
+
+
+def cmd_notify(a, cfg):
+    project = a.project or (cfg.get("project") or {}).get("name") or ROOT.name
+    try:
+        text = format_message(a.kind, project, a.issue or "", a.situation, a.need or "", a.option, a.recommend, a.detail or "")
+    except ValueError as exc:
+        sys.exit(f"notify: {exc}")
+    notify(text, tuple(a.channel or ["terminal"]))
+    log_event({"kind": "notify", "message_kind": a.kind.upper(), "issue": a.issue or "", "channels": a.channel or ["terminal"]})
+
+
 def cmd_account(a, cfg):
     """Prints '<account>|<config dir>' for the project at the current directory (dir empty = default
     ~/.claude). Prints nothing outside harness projects. Used by scripts/claude-accounts.sh."""
@@ -3455,6 +3550,18 @@ def main(argv=None):
     s = sub.add_parser("account", help="(used by the claude shell function) which Claude account this project uses")
     s.add_argument("--dir-for", help="print the config dir for a named account")
     s.set_defaults(fn=cmd_account)
+
+    s = sub.add_parser("notify", help="send the user a standard QUESTION / BLOCKER / DONE message")
+    s.add_argument("--kind", required=True, choices=[k.lower() for k in MESSAGE_KINDS] + list(MESSAGE_KINDS))
+    s.add_argument("--issue", help="issue number or reference")
+    s.add_argument("--project", help="default: [project].name")
+    s.add_argument("--situation", required=True, help="what is going on, at most 3 sentences")
+    s.add_argument("--need", help="the one decision or action needed (required unless DONE)")
+    s.add_argument("--option", action="append", help="repeat 2-3 times, or not at all")
+    s.add_argument("--recommend", type=int, help="1-based number of the recommended option")
+    s.add_argument("--detail", help="link to the raw CI log, agent output or issue comment")
+    s.add_argument("--channel", action="append", choices=sorted(CHANNELS), help="default: terminal")
+    s.set_defaults(fn=cmd_notify)
 
     s = sub.add_parser("factory", help="run a command (default: claude) with factory mode on for this project")
     fsub = s.add_subparsers(dest="action", required=True)
