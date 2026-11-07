@@ -1,6 +1,6 @@
 # Claude account switching for harness projects (zsh or bash). Add this line to ~/.zshrc:
 #
-#   source ~/code/claude-harness/scripts/claude-accounts.sh
+#   source ~/code/software-factory/scripts/claude-accounts.sh
 #
 # Then `claude` started inside a project whose .claude/harness.toml says
 #   [accounts]

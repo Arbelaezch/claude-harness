@@ -119,8 +119,8 @@ python3 scripts/harness.py models set reviewer glm  # swap the outside reviewer
 Requires [Claude Code](https://claude.com/claude-code), Python 3.11+ and the [GitHub CLI](https://cli.github.com/).
 
 ```sh
-git clone https://github.com/Arbelaezch/claude-harness.git ~/code/claude-harness
-claude plugin marketplace add ~/code/claude-harness
+git clone https://github.com/Arbelaezch/software-factory.git ~/code/software-factory
+claude plugin marketplace add ~/code/software-factory
 claude plugin install harness@personal-harness
 
 export DEEPSEEK_API_KEY=...   # optional; without it, reviews fall back to a Claude reviewer
@@ -139,7 +139,7 @@ claude
 Add this to `~/.zshrc`:
 
 ```sh
-source ~/code/claude-harness/scripts/claude-accounts.sh
+source ~/code/software-factory/scripts/claude-accounts.sh
 ```
 
 Plain `claude` then starts with the account the project asks for in `.claude/harness.toml`
@@ -163,7 +163,7 @@ the statusline command has to be set. This is a local setting, not part of the p
 ```json
 "statusLine": {
   "type": "command",
-  "command": "python3 ~/code/claude-harness/scripts/statusline_capture.py"
+  "command": "python3 ~/code/software-factory/scripts/statusline_capture.py"
 }
 ```
 
