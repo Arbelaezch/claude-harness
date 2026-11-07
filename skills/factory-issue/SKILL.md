@@ -3,7 +3,7 @@ name: factory-issue
 description: Build one GitHub issue end to end in a headless factory session (the /ship pipeline without human checkpoints), open the PR, and record the outcome. Started by `harness factory run`, one fresh session per issue.
 argument-hint: "<issue number>"
 disable-model-invocation: true
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/harness.py *) Bash(git status *) Bash(git diff *) Bash(git log *) Bash(git add *) Bash(git commit *) Bash(git push *) Bash(gh pr create *) Bash(gh issue view *)
+allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/harness.py *) Bash(git status) Bash(git status *) Bash(git diff *) Bash(git log *) Bash(git add *) Bash(git commit -F *) Bash(git push origin *) Bash(gh pr create *) Bash(gh issue view *)
 ---
 
 # /factory-issue: one issue, unattended
@@ -36,13 +36,19 @@ changes where humans were involved.
    - Do the same, without trying a workaround, for: a dirty tree you didn't create, changed dependencies, gates
      still failing after the retries /ship allows, an ESCALATE verdict, two failed fix attempts, a command the guard
      blocked, or any error you can't fix by following /ship.
-3. **Finish with a pull request.** When the verdict is DONE and the summary is written:
-   1. Stage only the files in the diff (`git status`, then `git add <paths>`; never `git add -A` or `.`), and commit
-      once with a message that names the issue, e.g. `Add export endpoint (#N)`. Don't skip hooks or amend.
-   2. Push the work branch: `git push origin <branch>`. Never push the base or a protected branch.
-   3. Open the PR: `gh pr create --base <base> --head <branch> --title "<title>" --body-file <run_dir>/pr-<repo>.md`.
+3. **Finish with a pull request.** When the verdict is DONE and the summary is written. Headless sessions can only
+   run a command that matches a pre-approved pattern, and anything else is refused with no one to approve it. So
+   **run every step below as its own Bash call: one plain command, no `&&`, `;` or `|`, no `cd`, no `2>&1`, no
+   multi-line `-m` message.** Use absolute paths instead of `cd`. (A first attempt that chained add, commit and
+   push in one call was refused for exactly this reason.)
+   1. `git status`, then stage only the files in the diff: `git add <path> <path> ...` (never `-A` or `.`).
+   2. Write the commit message to `<run_dir>/commit-msg.txt` with the Write tool: a first line that names the issue,
+      e.g. `Add export endpoint (#N)`, then a blank line and whatever trailer lines the session instructions require.
+      Then `git commit -F <run_dir>/commit-msg.txt`. Don't skip hooks or amend.
+   3. `git push origin <branch>`. Never push the base or a protected branch.
+   4. `gh pr create --base <base> --head <branch> --title "<title>" --body-file <run_dir>/pr-<repo>.md`.
       The draft already has `Closes #N`. Multi-repo issues get one PR per repo, linked as the draft says.
-   4. `H run end --status done`, then `H factory done N --pr <PR url>`.
+   5. `H run end --status done`, then `H factory done N --pr <PR url>`.
    Do not merge. Merging is the user's, or build step 6's.
 4. **If anything in step 3 fails** (push rejected, PR creation fails): `H factory block N` with what happened.
 5. **Rules that still apply:** subagents never commit or push; the guard enforces it. Keep your own output short.
