@@ -69,7 +69,8 @@ The factory takes a project path as an argument. One factory run handles one pro
 | `engineer` | Implements one task or fixes review findings | exists |
 | `claude-reviewer` | Fallback reviewer | exists |
 | `verifier` | Checks reviewer findings against the code | exists |
-| `factory-planner` | Reads the MVP doc, drafts issues with acceptance criteria and dependencies (`/factory-plan`) | exists |
+| `mvp-reviewer` | Checks the MVP, vision and design docs are clear and complete enough to answer builders' questions | exists |
+| `factory-planner` | Drafts issues with acceptance criteria and dependencies from the clarified docs (`/factory-plan`) | exists |
 | `issue-selector` | Picks the next issue from the `todo` pool | new |
 | `question-resolver` | Answers a question from the source docs, or decides it needs me (section 6) | new |
 | `human-liaison` | Sits between the factory and me for every question and blocker (section 7) | exists |
@@ -77,13 +78,20 @@ The factory takes a project path as an argument. One factory run handles one pro
 | `conflict-resolver` | Resolves a merge conflict using both sides' context | new |
 | `harness-cleanup` | End-of-run cleanup. First job: re-check out-of-scope concerns and file the survivors | new |
 
-Issue planning (step 4). `/factory-plan <mvp doc>` has `factory-planner` write a draft `issues.json`
-(key, title, body, 2 to 5 acceptance criteria, `depends_on` keys, labels). `harness factory issues-validate`
-checks it (unique keys and titles, known dependencies, no cycles) and prints the creation order; I approve,
-change or abort; only then `harness factory issues-create` makes the issues, dependencies first, with
-`Depends on #N` lines, skipping titles that already exist and logging each to `.factory/log.jsonl`. New issues
-get no `todo` label unless `--todo` is passed: I choose the pool. `harness factory labels` creates the section 8
-state labels.
+Planning from the MVP document (step 4). The care goes into the documents, not into approving issues.
+`/factory-plan <mvp doc>` first has `mvp-reviewer` write an `understanding.md` (what it thinks the project is,
+in and out of scope, decisions the documents already make) and a `gaps.json`: it invents 12 to 20 questions a
+builder would raise, checks whether the documents settle each, and keeps the unsettled ones with a proposed
+answer, whether the question is product or implementation, and whether it cascades. I confirm or correct the
+understanding, then answer the gaps in batches (product questions and cascading ones first; I can accept low-impact
+proposals in bulk, recorded as assumed). Every answer is appended to `.factory/decisions.md` with
+`harness factory decide`; `question-resolver` and the planners treat that file as a source document, so the same
+question is never asked twice. Only then does `factory-planner` draft the issues and `harness factory
+issues-create` make them, with no approval gate, dependencies first, `Depends on #N` lines, existing titles
+skipped, each logged to `.factory/log.jsonl`. The checks on the draft (unique keys and titles, known dependencies,
+no cycles) run inside `issues-create`; `--dry-run` is the planner's self-check. Issues never get `todo`: I tell
+the manager which issues to work on and the run loop (step 5) labels them. `harness factory labels` creates the
+section 8 state labels.
 
 Git permissions by role: only the factory manager and the roles below may commit, push, create PRs or
 merge, and only in factory mode (section 11). `scout`, `planner` and the reviewers stay read-only

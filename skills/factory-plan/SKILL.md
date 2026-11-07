@@ -1,41 +1,50 @@
 ---
 name: factory-plan
-description: Draft GitHub issues from a project's MVP document with the factory-planner, get the user's approval of the list, then create the issues (dependencies first). Factory step 4.
-argument-hint: "<path to MVP doc> [--vision <path>] [--todo]"
+description: Check that a project's MVP and design documents are clear, correctly understood and complete enough for agents to build from, record the user's answers, then create the GitHub issues. Factory step 4.
+argument-hint: "<path to MVP doc> [--vision <path>]"
 disable-model-invocation: true
 allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/harness.py *) Bash(gh issue list *) Bash(gh label list *)
 ---
 
-# /factory-plan: MVP document to approved issues
+# /factory-plan: from MVP document to issues
 
-You are the **manager**. You coordinate; you don't write the issues yourself. Keep your context small: pass file
-paths, read only the short outputs of harness commands.
+You are the **manager**. You coordinate agents and harness commands; you don't judge the documents or write
+issues yourself. The goal is that the documents are clear and complete enough that builders (and the
+`question-resolver`) can answer their own questions later. Issue creation is the easy part and has no approval
+gate; the care goes into steps 2 to 4.
 
 Arguments: `$ARGUMENTS`
 - The first path is the MVP document. If it's missing, ask for it and stop.
-- `--vision <path>`: the vision document, if the user has one.
-- `--todo`: label every created issue `todo` (default: no label, the user picks the pool later).
+- `--vision <path>`: the vision document, if the user has one. If none exists and the MVP document has no vision
+  section, say so: product questions can't be settled without one. Ask whether to continue anyway.
 
 Harness command (use exactly this form so it's pre-approved):
 `H = python3 ${CLAUDE_PLUGIN_ROOT}/scripts/harness.py --root ${CLAUDE_PROJECT_DIR}`
 
+Work folder: `${CLAUDE_PROJECT_DIR}/.factory/plans/<YYYYMMDD-HHMM>/` (create it).
+
 ## Steps
 
-1. **Output path.** `PLAN=${CLAUDE_PROJECT_DIR}/.factory/plans/<YYYYMMDD-HHMM>/issues.json`. Create the folder.
-2. **Draft.** Spawn the `factory-planner` agent. Tell it: the MVP document path, the vision path if any, `PLAN`,
-   the harness command, and (on later rounds) the user's feedback verbatim. If `models` overrides apply to it,
-   pass them as in /ship.
-3. **Show the list.** Run `H factory issues-validate PLAN`. If it fails, send the problems back to the planner once;
-   if it still fails, stop and tell the user. Otherwise show the user the output (key, title, criteria count,
-   dependencies, notes), plus the planner's short summary. Offer to open `PLAN` for the full text.
-4. **Approval.** Ask with AskUserQuestion: approve, change (they say what), or abort. On change, go back to step 2
-   with their words as feedback (at most 3 rounds, then ask whether to continue by hand-editing `PLAN`). The user
-   may also edit `PLAN` themselves; re-validate after.
-5. **Create.** Only after an explicit approve: `H factory issues-create PLAN [--todo]`. Use `--dry-run` first if
-   the user asked to see the order. The command creates the factory state labels if missing, skips issues whose
-   title already exists, and writes `Depends on #N` lines.
-6. **Report.** Show the created issue numbers and the `.factory/log.jsonl` path. Nothing runs automatically; the
-   user chooses which issues to label `todo` and run with `/ship`.
-
-Never create issues before the approval, never add `todo` unless `--todo` was given, and never edit the draft
-yourself to "fix" the planner's work: send it back.
+1. **Review the documents.** Spawn `mvp-reviewer` with the document paths, the work folder and the harness
+   command. It writes `understanding.md` and `gaps.json` there.
+2. **Confirm the understanding.** Show the user `understanding.md` and ask (AskUserQuestion) whether it matches
+   what they meant: correct, or wrong in places (they say where). If wrong, note the corrections, record each
+   with `H factory decide ... --kind product --by user --why "clarifies the MVP document"`, and re-run step 1 so
+   the gaps reflect the corrected reading. At most 2 rounds.
+3. **Close the gaps.** Read `gaps.json`. Show contradictions first. Then put the gaps to the user in batches of
+   up to 4 questions (AskUserQuestion), product questions and anything that cascades first. Each question shows
+   the reviewer's proposal as the recommended option; the user can accept it, answer differently, or say
+   "skip" (the gap stays open and is noted on the issues). Record every answer immediately with
+   `H factory decide --question ... --answer ... --by user --kind <product|implementation> --why ... --source ...`.
+   Offer once to accept all remaining low-impact implementation proposals in bulk; if accepted, record them with
+   `--by assumed` and the reviewer's reasoning. Never answer a product question for the user.
+4. **Say whether the documents are ready.** One or two lines: what's settled, what's still open and which issues
+   it will touch. Ask whether to continue to planning or to stop here and let the user update the documents.
+5. **Plan and create.** Spawn `factory-planner` with the document paths, `.factory/decisions.md`, the work folder's
+   `issues.json` path and the harness command. Then run `H factory issues-create <issues.json>`: it checks the list,
+   creates the factory labels if missing, creates the issues dependencies first with `Depends on #N` lines,
+   and skips titles that already exist. If it reports problems, send them back to the planner once; if they
+   persist, stop and tell the user. Don't add the `todo` label and don't fix the draft yourself.
+6. **Report.** The created issue numbers with titles and dependencies as a compact list, the planner's open notes,
+   and the paths of `.factory/decisions.md` and `.factory/log.jsonl`. Nothing runs automatically: the user tells
+   the manager which issues to work on.

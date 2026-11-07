@@ -448,7 +448,10 @@ class IssuePlanTests(unittest.TestCase):
         self.assertTrue(body.rstrip().endswith("Depends on #7"))
         self.assertNotIn("Depends on", h.render_issue_body(issue("a"), {}))
 
-    def run_create(self, plan, existing=(), todo=False, dry_run=False, have_labels=("enhancement", "bug")):
+    def setUp(self):
+        self.out = io.StringIO()
+
+    def run_create(self, plan, existing=(), dry_run=False, have_labels=("enhancement", "bug")):
         calls = []
 
         def fake_gh(*args, input_text=None, **kw):
@@ -463,8 +466,8 @@ class IssuePlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(h, "ROOT", Path(tmp)), \
                 mock.patch.object(h, "gh", fake_gh), mock.patch.object(h, "gh_json", fake_json), \
                 mock.patch.object(h, "slug_of", lambda cfg, r: "o/r"), mock.patch.object(h, "repos", lambda cfg: {"app": {}}), \
-                mock.patch.object(h, "load_issue_plan", lambda f: plan), contextlib.redirect_stdout(io.StringIO()):
-            a = mock.Mock(file="x", repo=None, todo=todo, dry_run=dry_run)
+                mock.patch.object(h, "load_issue_plan", lambda f: plan), contextlib.redirect_stdout(self.out):
+            a = mock.Mock(file="x", repo=None, dry_run=dry_run)
             h.cmd_factory_issues_create(a, {})
             log = (Path(tmp) / ".factory" / "log.jsonl")
             logged = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
@@ -479,22 +482,46 @@ class IssuePlanTests(unittest.TestCase):
         self.assertNotIn("todo", [c[i + 1] for c, _ in creates for i, x in enumerate(c) if x == "--label"])
         self.assertEqual([(e["key"], e["number"]) for e in logged], [("a", 101), ("b", 102)])
 
-    def test_create_skips_existing_titles_and_adds_todo_when_asked(self):
+    def test_create_skips_existing_titles(self):
         plan = {"issues": [issue("b", ["a"]), issue("a")]}
-        calls, logged = self.run_create(plan, existing=[("Do a", 5)], todo=True)
+        calls, logged = self.run_create(plan, existing=[("Do a", 5)])
         creates = [(c, body) for c, body in calls if c[:2] == ("issue", "create")]
         self.assertEqual(len(creates), 1)
         self.assertIn("Depends on #5", creates[0][1])
-        self.assertIn("todo", creates[0][0])
-        self.assertIn(("label", "create", "todo"), [c[:3] for c, _ in calls])  # factory label made on demand
+        self.assertNotIn("todo", creates[0][0])  # the user names the issues to run; creation never queues them
 
     def test_missing_non_factory_label_is_an_error(self):
         with self.assertRaises(RuntimeError):
             self.run_create({"issues": [issue("a", labels=["wizardry"])]})
 
-    def test_dry_run_creates_nothing(self):
-        calls, logged = self.run_create({"issues": [issue("a")]}, dry_run=True)
+    def test_dry_run_creates_nothing_and_prints_the_order(self):
+        calls, logged = self.run_create({"issues": [issue("b", ["a"]), issue("a")]}, dry_run=True)
         self.assertEqual((calls, logged), ([], []))
+        self.assertIn("2 issues would be created", self.out.getvalue())
+
+    def test_problems_stop_creation_before_anything_is_made(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "i.json"
+            f.write_text(json.dumps({"issues": [issue("a", ["b"]), issue("b", ["a"])]}))
+            with self.assertRaises(SystemExit) as cm, mock.patch.object(h, "gh") as gh:
+                h.load_issue_plan(str(f))
+            self.assertIn("cycle", str(cm.exception))
+            gh.assert_not_called()
+
+    def test_decide_appends_to_the_decisions_file(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(h, "ROOT", Path(tmp)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for q, by in (("Who can delete a resume?", "user"), ("Max upload size?", "assumed")):
+                h.cmd_factory_decide(mock.Mock(question=q, answer="Only the owner.\nAlways.", by=by, kind="product",
+                                               why="vision doc", source="MVP.md:12"), {})
+            text = (Path(tmp) / ".factory" / "decisions.md").read_text()
+            log = (Path(tmp) / ".factory" / "log.jsonl").read_text().splitlines()
+        self.assertEqual(text.count("# Decisions"), 1)
+        self.assertIn("## Who can delete a resume?", text)
+        self.assertIn("- Decision: Only the owner. Always.", text)
+        self.assertIn("- Decided by: assumed on ", text)
+        self.assertIn("- Source: MVP.md:12", text)
+        self.assertEqual(len(log), 2)
 
 
 if __name__ == "__main__":

@@ -3425,27 +3425,37 @@ def cmd_factory_labels(a, cfg):
     print(f"factory labels are in place in {slug}: {', '.join(FACTORY_LABELS)}")
 
 
-def cmd_factory_issues_validate(a, cfg):
-    plan = load_issue_plan(a.file)
-    order = issue_order(plan)
-    by = {i["key"]: i for i in plan["issues"]}
-    print(f"{len(order)} issues, in creation order:")
-    for k in order:
-        d = ", ".join(by[k].get("depends_on") or []) or "-"
-        print(f"  {k:<28} {by[k]['title'][:60]}  (criteria: {len(by[k]['acceptance'])}, depends on: {d})")
-    for note in plan.get("notes") or []:
-        print(f"note: {note}")
+DECISIONS_HEADER = ("# Decisions\n\nQuestions about the product or its implementation and how they were settled. Recorded by the "
+                    "factory; `question-resolver` and the planners treat these as source documents.\n")
+
+
+def cmd_factory_decide(a, cfg):
+    """Append one settled question to .factory/decisions.md (the user's answer, or a recorded assumption)."""
+    d = ROOT / ".factory"
+    d.mkdir(exist_ok=True)
+    f = d / "decisions.md"
+    one = lambda t: " ".join(t.split())
+    entry = (f"\n## {one(a.question)}\n- Kind: {a.kind}\n- Decision: {one(a.answer)}\n- Decided by: {a.by} on {iso()[:10]}\n"
+             + (f"- Why: {one(a.why)}\n" if a.why else "") + (f"- Source: {one(a.source)}\n" if a.source else ""))
+    f.write_text((f.read_text(encoding="utf-8") if f.exists() else DECISIONS_HEADER) + entry, encoding="utf-8")
+    factory_log({"kind": "decision", "question": one(a.question)[:200], "by": a.by, "decision_kind": a.kind})
+    print(f"recorded in {f}")
 
 
 def cmd_factory_issues_create(a, cfg):
-    plan = load_issue_plan(a.file)
+    plan = load_issue_plan(a.file)  # exits with every problem before anything is created
     order = issue_order(plan)
     by = {i["key"]: i for i in plan["issues"]}
     if a.dry_run:
-        print("would create, in this order: " + ", ".join(order))
+        print(f"{len(order)} issues would be created, dependencies first:")
+        for k in order:
+            d = ", ".join(by[k].get("depends_on") or []) or "-"
+            print(f"  {k:<28} {by[k]['title'][:60]}  (criteria: {len(by[k]['acceptance'])}, depends on: {d})")
+        for note in plan.get("notes") or []:
+            print(f"note: {note}")
         return
     slug = factory_repo(a, cfg)
-    labels_used = {lb for i in plan["issues"] for lb in (i.get("labels") or ["enhancement"])} | ({"todo"} if a.todo else set())
+    labels_used = {lb for i in plan["issues"] for lb in (i.get("labels") or ["enhancement"])}
     ensure_labels(slug, labels_used)
     existing = {x["title"].strip().lower(): x["number"] for x in
                 gh_json("issue", "list", "--repo", slug, "--state", "all", "--limit", "500", "--json", "title,number") or []}
@@ -3458,11 +3468,11 @@ def cmd_factory_issues_create(a, cfg):
             print(f"exists   #{numbers[key]}  {title}")
             continue
         args = ["issue", "create", "--repo", slug, "--title", title, "--body-file", "-"]
-        for lb in (it.get("labels") or ["enhancement"]) + (["todo"] if a.todo else []):
+        for lb in it.get("labels") or ["enhancement"]:
             args += ["--label", lb]
         url = gh(*args, input_text=render_issue_body(it, numbers)).strip().splitlines()[-1]
         numbers[key] = int(url.rstrip("/").rsplit("/", 1)[-1])
-        factory_log({"kind": "issue_created", "key": key, "number": numbers[key], "repo": slug, "todo": a.todo})
+        factory_log({"kind": "issue_created", "key": key, "number": numbers[key], "repo": slug})
         print(f"created  #{numbers[key]}  {title}")
 
 
@@ -3739,15 +3749,19 @@ def main(argv=None):
     f = fsub.add_parser("labels", help="create the factory state labels (todo, in-progress, ...) in the repo")
     f.add_argument("--repo", help="repo name from .claude/harness.toml (default: the only repo)")
     f.set_defaults(fn=cmd_factory_labels)
-    f = fsub.add_parser("issues-validate", help="check a drafted issues.json and print the creation order")
-    f.add_argument("file")
-    f.set_defaults(fn=cmd_factory_issues_validate)
-    f = fsub.add_parser("issues-create", help="create GitHub issues from an approved issues.json, dependencies first")
+    f = fsub.add_parser("issues-create", help="check a drafted issues.json and create the GitHub issues, dependencies first (--dry-run: check only)")
     f.add_argument("file")
     f.add_argument("--repo", help="repo name from .claude/harness.toml (default: the only repo)")
-    f.add_argument("--todo", action="store_true", help="also label every created issue `todo` (default: no)")
     f.add_argument("--dry-run", action="store_true")
     f.set_defaults(fn=cmd_factory_issues_create)
+    f = fsub.add_parser("decide", help="record a settled question in .factory/decisions.md")
+    f.add_argument("--question", required=True)
+    f.add_argument("--answer", required=True)
+    f.add_argument("--by", choices=["user", "assumed"], required=True)
+    f.add_argument("--kind", choices=["product", "implementation"], required=True)
+    f.add_argument("--why", help="the reasoning, especially for an assumption")
+    f.add_argument("--source", help="doc line it comes from, if any")
+    f.set_defaults(fn=cmd_factory_decide)
 
     s = sub.add_parser("doctor", help="check the setup")
     s.add_argument("--ping", action="store_true", help="also send a tiny request to the reviewer API")
