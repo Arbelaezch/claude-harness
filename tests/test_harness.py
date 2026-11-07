@@ -96,21 +96,21 @@ class FactoryGuardTests(unittest.TestCase):
     def test_bad_marker_is_rejected(self):
         for kw in ({"pid": 2 ** 22 + 12345}, {"started": time.time() - 10 ** 6}, {"project": "/nope"}):
             self.marker(**kw)
-            self.assertIsNone(self.ctx(None), kw)
+            self.assertIsNone(h.load_marker(self.project), kw)
         self.marker()
         os.chmod(h.marker_dir() / f"{NONCE}.json", 0o666)
-        self.assertIsNone(self.ctx(None))
+        self.assertIsNone(h.load_marker(self.project))
         with mock.patch.dict(os.environ, {h.MARKER_ENV: "../../etc/passwd"}):
-            self.assertIsNone(self.ctx(None))
+            self.assertIsNone(h.load_marker(self.project))
 
     def test_marker_for_other_or_sibling_directory(self):
         self.marker()
-        self.assertIsNotNone(self.ctx(None))
-        self.assertIsNone(self.ctx(None, os.path.join(self.home, "p", "app2")))
-        self.assertIsNone(self.ctx(None, self.home))
+        self.assertIsNotNone(h.load_marker(self.project))
+        self.assertIsNone(h.load_marker(os.path.join(self.home, "p", "app2")))
+        self.assertIsNone(h.load_marker(self.home))
         link = os.path.join(self.home, "link")
         os.symlink(os.path.join(self.home, "p", "app2"), link)
-        self.assertIsNone(self.ctx(None, link))
+        self.assertIsNone(h.load_marker(link))
 
     def test_ci_fixer_pushes_only_its_pr_branch(self):
         self.marker()
@@ -170,7 +170,7 @@ class FactoryGuardTests(unittest.TestCase):
             for cmd in ("git push origin feat/x", "git commit -m x", "git add a.py"):
                 self.assertIsNotNone(self.bash(cmd, agent), (agent, cmd))
         self.assertIsNotNone(self.bash("git push origin feat/x", "harness:engineer"))
-        self.assertIsNotNone(self.bash("git commit -m x", "harness:ci-fixer"))
+        self.assertIsNotNone(self.bash("git merge origin/develop", "harness:ci-fixer"))
 
     def test_manager_needs_explicit_role(self):
         m = self.marker()
@@ -219,6 +219,34 @@ class FactoryGuardTests(unittest.TestCase):
     def test_launcher_needs_branch_fields_per_role(self):
         self.assertEqual(h.FACTORY_ROLE_FIELDS["conflict-resolver"], ("pr_branch", "base_branch"))
         self.assertEqual(set(h.FACTORY_ROLE_FIELDS), set(h.FACTORY_ROLES))
+
+    def test_worker_session_is_held_to_its_role(self):
+        """A `claude -p` worker launched with its own marker has no agent_type, but must not get main-session powers."""
+        self.marker(role="ci-fixer", base_branch="develop")
+        def deny(cmd, cwd=None):
+            out = self.hook(h.hook_guard_bash, {"command": cmd}, None, cwd)
+            return bool(out) and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        self.assertFalse(deny("git push origin feat/x"))
+        self.assertFalse(deny("git add a.py && git commit -m fix"))
+        for cmd in ("git push origin other", "git push --force origin feat/x", "gh pr merge 3", "gh pr create",
+                    "git merge origin/develop", "git add -A"):
+            self.assertTrue(deny(cmd), cmd)
+        self.branch = "other"
+        self.assertTrue(deny("git push"))
+        self.assertTrue(deny("git commit -m x"))
+        self.branch = "feat/x"
+        self.assertTrue(deny("git push origin feat/x", os.path.join(self.home, "p", "app2")))  # outside the project
+
+    def test_engineer_worker_session_cannot_push(self):
+        self.marker(role="engineer")
+        self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "git commit -m x"}))
+        out = self.hook(h.hook_guard_github, {"command": "git push origin feat/x"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_manager_session_keeps_main_session_powers(self):
+        self.marker(role="manager")
+        self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "git push origin feat/x"}))
+        self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "gh pr merge 3"}))
 
     def hook(self, fn, tool_input, agent=None, cwd=None):
         payload = json.dumps({"cwd": cwd or self.project, "agent_type": agent, "tool_input": tool_input})
