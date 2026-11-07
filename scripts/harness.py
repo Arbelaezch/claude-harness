@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -845,6 +846,142 @@ def current_branch(path: str | None) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+# Factory mode (docs/factory-design.md section 11). The launcher exports SOFTWARE_FACTORY_MARKER=<nonce> and writes
+# <home>/.software-factory/markers/<nonce>.json = {project, pid, started, role, [pr_branch], [issue_branch]}.
+# Both must agree, the file must be ours and fresh, its pid alive, and the cwd inside `project`. Factory mode only
+# lifts the subagent denial for a few role/action pairs; it never skips the account check or the hard blocks.
+MARKER_ENV = "SOFTWARE_FACTORY_MARKER"
+MARKER_TTL = 24 * 3600
+NONCE_RE = re.compile(r"^[A-Za-z0-9]{32}$")
+FACTORY_ROLES = {  # role -> actions it may take
+    "manager": {"push", "pr_create", "pr_merge"},
+    "engineer": {"add", "commit"},
+    "ci-fixer": {"push"},
+    "conflict-resolver": {"push", "merge", "add", "commit"},
+}
+FACTORY_BRANCH_KEY = {"engineer": "issue_branch", "ci-fixer": "pr_branch", "conflict-resolver": "pr_branch"}
+
+
+def marker_dir() -> Path:
+    return Path(os.environ.get("SOFTWARE_FACTORY_HOME") or Path.home()) / ".software-factory" / "markers"
+
+
+def within(path: str | None, root: str) -> bool:
+    if not path:
+        return False
+    try:
+        p, r = os.path.realpath(path), os.path.realpath(root)
+        return os.path.commonpath([p, r]) == r
+    except ValueError:
+        return False
+
+
+def load_marker(cwd: str | None) -> dict | None:
+    """The valid factory marker for this cwd, or None. Fails closed on anything off."""
+    nonce = os.environ.get(MARKER_ENV, "")
+    if not NONCE_RE.match(nonce):
+        return None
+    f = marker_dir() / f"{nonce}.json"
+    try:
+        st = f.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            return None
+        m = json.loads(f.read_text())
+        os.kill(int(m["pid"]), 0)
+        if not (0 <= time.time() - float(m["started"]) <= MARKER_TTL):
+            return None
+        if not isinstance(m.get("project"), str) or not within(cwd, m["project"]):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return m
+
+
+def factory_permission(marker: dict | None, agent_type: str | None, cwd: str | None, action: str,
+                       branch: str | None = None) -> bool:
+    """True only when the marker is valid for cwd and the role may take this action (on this branch).
+    The role of a subagent comes from the hook payload's agent_type; a call without one counts as the manager
+    only when the marker says role = "manager"."""
+    if not marker or not isinstance(marker.get("project"), str) or not within(cwd, marker["project"]):
+        return False
+    if agent_type:
+        role = agent_type.split(":")[-1]
+    elif marker.get("role") == "manager":
+        role = "manager"
+    else:
+        return False
+    if action not in FACTORY_ROLES.get(role, ()):
+        return False
+    key = FACTORY_BRANCH_KEY.get(role)
+    return key is None or (bool(branch) and branch == marker.get(key))
+
+
+def factory_context(payload: dict) -> dict | None:
+    marker = load_marker(payload.get("cwd"))
+    if not marker:
+        return None
+    return {"marker": marker, "agent_type": payload.get("agent_type") or None, "cwd": payload.get("cwd")}
+
+
+def marker_tamper_denial(payload: dict, factory: dict | None) -> str | None:
+    """In factory mode nobody but the launcher touches ~/.software-factory (markers live there)."""
+    if not factory:
+        return None
+    ti = payload.get("tool_input") or {}
+    cwd = payload.get("cwd")
+    root = str(marker_dir().parent)
+    hit = ".software-factory" in (ti.get("command") or "").replace("\\", "/") or any(
+        within(os.path.join(cwd or ".", ti[k]), root) for k in ("file_path", "notebook_path") if ti.get(k))
+    return "Factory marker files are managed by the launcher only." if hit else None
+
+
+GIT_CONFIG_READS = ("--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope")
+
+
+def factory_git_denial(toks: list[str], sub: str, args: list[str]) -> str | None:
+    """In factory mode a subagent may not redirect git (other repo, config overrides, remote rewrites)."""
+    i = 1
+    while i < len(toks) and toks[i].startswith("-"):
+        if toks[i] != "-C":
+            return f"`git {toks[i]}` is blocked for subagents in factory mode: it can point git at another repo or config."
+        i += 2
+    if sub == "config" and not any(a in GIT_CONFIG_READS for a in args):
+        return "`git config` writes are blocked for subagents in factory mode."
+    return None
+
+
+def factory_push_ok(args: list[str], target: str | None, factory: dict) -> bool:
+    """A subagent push is allowed in factory mode only as `git push [origin [<branch>]]` to its one PR branch."""
+    positional = [a for a in args if not a.startswith("-")]
+    if len(positional) != len(args) or len(positional) > 2 or (positional and positional[0] != "origin"):
+        return False
+    br = current_branch(target)
+    ref = positional[1] if len(positional) == 2 else br
+    if ref == "HEAD":
+        ref = br
+    if not ref or ":" in ref or (len(positional) == 2 and ref != br):
+        return False
+    return factory_permission(factory["marker"], factory["agent_type"], factory["cwd"], "push", ref)
+
+
+def factory_commit_ok(sub: str, args: list[str], target: str | None, factory: dict | None) -> bool:
+    """Factory engineer / conflict-resolver: `git add <paths>`, `git commit` and (resolver only) merging the marker's
+    base branch, on their own branch; no blanket adds, no skipped hooks."""
+    if not factory or not within(target, factory["marker"]["project"]):
+        return False
+    if sub == "merge":
+        base = factory["marker"].get("base_branch")
+        ok = args == ["--abort"] or (bool(base) and [a for a in args if a != "--no-edit"] == [f"origin/{base}"])
+        if not ok:
+            return False
+    if sub == "add" and any(a in ("-A", "--all", ".", "-u", "--update", "-f", "--force") for a in args):
+        return False
+    if sub == "commit" and any(a in ("--no-verify", "--no-gpg-sign") or re.match(r"^-[a-zA-Z]*n[a-zA-Z]*$", a)
+                               for a in args):
+        return False
+    return factory_permission(factory["marker"], factory["agent_type"], factory["cwd"], sub, current_branch(target))
+
+
 # GitHub / git write policy (see [github] in scripts/defaults.toml). Two roles x two account classes:
 #   * "writer" account = a gh login in [github].write_accounts (default: personal). Main session only:
 #     commit/add, push, merge/cherry-pick/revert/tag, and every PR/issue write (create, merge, edit, comment, review...).
@@ -913,10 +1050,13 @@ def any_account_denial(command: str, cfg: dict, what: str) -> str | None:
     return None
 
 
-def push_denial(command: str, args: list[str], cfg: dict, target: str | None, subagent: bool = False) -> str | None:
+def push_denial(command: str, args: list[str], cfg: dict, target: str | None, subagent: bool = False,
+                factory: dict | None = None) -> str | None:
     """`git push` runs only in the main session, as a [github].write_accounts account, and never as a force
-    push, a branch/tag deletion, a mirror push or a push to a protected branch."""
-    if subagent:
+    push, a branch/tag deletion, a mirror push or a push to a protected branch. In factory mode a ci-fixer or
+    conflict-resolver may also push its PR branch (still as a writer account)."""
+    if subagent and not (factory and within(target, factory["marker"]["project"])
+                         and factory_push_ok(args, target, factory)):
         return subagent_denial("git push")
     protected = set((cfg.get("git") or {}).get("protected_branches", []))
     positional = [a for a in args if not a.startswith("-")]
@@ -978,7 +1118,8 @@ def git_writer_denial(sub: str, args: list[str], command: str, cfg: dict) -> str
     return None
 
 
-def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False) -> str | None:
+def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False,
+               factory: dict | None = None) -> str | None:
     """Return a denial reason, or None when the command is allowed."""
     gcfg = cfg.get("git") or {}
     mode = gcfg.get("mode", "uncommitted")
@@ -998,10 +1139,14 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
         if not sub:
             continue
         target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
+        if factory and subagent:
+            denial = factory_git_denial(toks, sub, args)
+            if denial:
+                return denial
         if sub == "remote" and args and args[0] in ("add", "remove", "rm", "rename", "set-url", "set-head"):
             return "Changing git remotes is blocked."
         if sub == "push":
-            denial = push_denial(command, args, cfg, target, subagent)
+            denial = push_denial(command, args, cfg, target, subagent, factory)
             if denial:
                 return denial
             continue
@@ -1030,7 +1175,9 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
                 return f"`git pull` is blocked for subagents. {SUBAGENT_BLOCKED['pull']}"
             if sub == "stash":
                 return f"`git stash` is blocked for subagents. {SUBAGENT_BLOCKED['stash']}"
-            if sub in GIT_WRITER_ONLY and (mode != "commit" or sub not in ("commit", "add")):
+            if sub in ("commit", "add", "merge") and factory_commit_ok(sub, args, target, factory):
+                pass  # factory engineer/resolver on its own branch; the account check below still applies
+            elif sub in GIT_WRITER_ONLY and (mode != "commit" or sub not in ("commit", "add")):
                 hint = " (Set git.mode = \"commit\" in `.claude/harness.toml` to let the engineer commit.)" if sub in ("commit", "add") else ""
                 return f"`git {sub}` is blocked for subagents. {SUBAGENT_BLOCKED[sub]}{hint}"
         if sub in GIT_WRITER_ONLY:
@@ -1043,7 +1190,8 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
     return None
 
 
-def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False) -> str | None:
+def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagent: bool = False,
+                        factory: dict | None = None) -> str | None:
     """Hard stop for every project (also ones without a harness config): the account rules for push, commit,
     merge, tag and PR/issue writes, via git, gh or `gh api`."""
     workdir = cwd
@@ -1052,9 +1200,13 @@ def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagen
             workdir = toks[1] if os.path.isabs(toks[1]) else os.path.join(workdir or ".", toks[1])
             continue
         sub, args, cdir = git_parts(toks)
+        if sub and factory and subagent:
+            denial = factory_git_denial(toks, sub, args)
+            if denial:
+                return denial
         if sub == "push":
             target = cdir if cdir and os.path.isabs(cdir) else (os.path.join(workdir or ".", cdir) if cdir else workdir)
-            denial = push_denial(command, args, cfg, target, subagent)
+            denial = push_denial(command, args, cfg, target, subagent, factory)
             if denial:
                 return denial
         elif sub:
@@ -1071,7 +1223,9 @@ def check_github_global(command: str, cfg: dict, cwd: str | None = None, subagen
 def hook_guard_github(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
-    reason = check_github_global(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")))
+    factory = factory_context(payload)
+    reason = marker_tamper_denial(payload, factory) or \
+        check_github_global(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")), factory=factory)
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -1081,7 +1235,9 @@ def hook_guard_github(cfg):
 def hook_guard_bash(cfg):
     payload = json.loads(sys.stdin.read() or "{}")
     cmd = (payload.get("tool_input") or {}).get("command", "")
-    reason = check_bash(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")))
+    factory = factory_context(payload)
+    reason = marker_tamper_denial(payload, factory) or \
+        check_bash(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")), factory=factory)
     if reason:
         log_event({"kind": "guard_block", "run_id": current_run_id(),
                    "stage": (payload.get("agent_type") or "manager").split(":")[-1], "command": cmd[:300], "reason": reason})

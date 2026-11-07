@@ -264,7 +264,26 @@ This boundary must always hold.
 - Professional harnesses keep the current rules exactly: no commits by agents, no pushes, no GitHub writes,
   commits and pushes only by me through the main session as my personal account.
 - Factory mode is enabled only by an explicit marker set by the factory launcher, and only for the project
-  directory it was started on.
+  directory it was started on. The marker is an env var plus a file, and both must agree:
+  the launcher exports `SOFTWARE_FACTORY_MARKER=<32-char nonce>` and writes
+  `~/.software-factory/markers/<nonce>.json` with `{project, pid, started, role, pr_branch?, issue_branch?, base_branch?}`
+  (mode 0600, deleted on exit). The guard accepts it only if the nonce is well-formed, the file is a regular
+  file owned by the user and not group/world-writable, the pid is alive, `started` is under 24 hours old, and the
+  realpath of the cwd (including `cd` and `git -C` targets) is inside `project`. Any error means no factory mode.
+- The role of a subagent always comes from the hook payload's `agent_type`, never from the marker, because
+  subagents inherit the env var. A call with no `agent_type` is the manager only if the file says
+  `role = "manager"`, so an interactive session in the same terminal gets nothing.
+- Factory mode only lifts the subagent denial, and only for: `engineer` add/commit on `issue_branch` (no
+  `add -A`/`.`, no `--no-verify`); `ci-fixer` and `conflict-resolver` `git push [origin [<branch>]]` of
+  `pr_branch` (no flags, refspecs or URL remotes). `conflict-resolver` also merges `origin/<base_branch>` (or
+  `--abort`) into `pr_branch` and may add/commit there, so it never rebases or force-pushes. It never skips the account check (a work-account session is
+  still denied), and never lifts force/delete pushes, protected branches, `--amend`, rebase, token/host overrides
+  or gh account switching. The manager's own powers are unchanged: they already come from the main-session rules.
+- In factory mode the guard denies Bash, Write, Edit and notebook calls that mention or reach `~/.software-factory`.
+  That is best effort against a process running as the same user. The real barrier is a `permissions.deny` rule in
+  user settings for `Write`/`Edit` on `~/.software-factory/**`; add it when the launcher ships.
+- In factory mode a subagent may not use `git -c`, `--git-dir` or `--work-tree`, or write `git config`, since those
+  can redirect a push to another repo or URL.
 - The guard defaults to deny. Without the marker, or outside that directory, behaviour is today's.
 - Factory-mode permissions are per role (section 4), not blanket. Merges and PR creation belong to the
   factory manager.
@@ -311,5 +330,9 @@ in `~/.claude-personal`, the README and `scripts/claude-accounts.sh`.
 ## 15. Open items
 
 - Phone push notifications do not arrive (section 7, "Phone access"). Revisit when fixed.
-- Decide the exact `factory mode` marker mechanism once the guard code has been read in detail.
+- Build the launcher half of the marker (write/delete the file, export the nonce). The guard side is done.
+- Per-worker `pr_branch`/`issue_branch` cannot be written by a launcher for Task subagents. Either launch
+  workers as separate sessions with their own marker, or give each worker a worktree and derive the branch there.
+- The hooks treat a missing `agent_type` as the main session and a main session run with `--agent` as a
+  subagent. Check the payload for both before relying on it.
 - Confirm what the usage probe reports when I am near or over a limit (the `status` field values are unseen).
