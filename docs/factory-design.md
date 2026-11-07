@@ -69,13 +69,21 @@ The factory takes a project path as an argument. One factory run handles one pro
 | `engineer` | Implements one task or fixes review findings | exists |
 | `claude-reviewer` | Fallback reviewer | exists |
 | `verifier` | Checks reviewer findings against the code | exists |
-| `factory-planner` | Reads the MVP doc, creates issues with acceptance criteria and dependencies | new |
+| `factory-planner` | Reads the MVP doc, drafts issues with acceptance criteria and dependencies (`/factory-plan`) | exists |
 | `issue-selector` | Picks the next issue from the `todo` pool | new |
 | `question-resolver` | Answers a question from the source docs, or decides it needs me (section 6) | new |
-| `human-liaison` | Sits between the factory and me for every question and blocker (section 7) | new |
+| `human-liaison` | Sits between the factory and me for every question and blocker (section 7) | exists |
 | `ci-fixer` | Diagnoses a failed CI run, comments on the PR, attempts one fix | new |
 | `conflict-resolver` | Resolves a merge conflict using both sides' context | new |
 | `harness-cleanup` | End-of-run cleanup. First job: re-check out-of-scope concerns and file the survivors | new |
+
+Issue planning (step 4). `/factory-plan <mvp doc>` has `factory-planner` write a draft `issues.json`
+(key, title, body, 2 to 5 acceptance criteria, `depends_on` keys, labels). `harness factory issues-validate`
+checks it (unique keys and titles, known dependencies, no cycles) and prints the creation order; I approve,
+change or abort; only then `harness factory issues-create` makes the issues, dependencies first, with
+`Depends on #N` lines, skipping titles that already exist and logging each to `.factory/log.jsonl`. New issues
+get no `todo` label unless `--todo` is passed: I choose the pool. `harness factory labels` creates the section 8
+state labels.
 
 Git permissions by role: only the factory manager and the roles below may commit, push, create PRs or
 merge, and only in factory mode (section 11). `scout`, `planner` and the reviewers stay read-only
@@ -323,7 +331,7 @@ marker with the wrong directory, and a subagent without push rights.
 1. Rename the repo and fix paths (section 14).
 2. Factory-mode guard with tests. Nothing else is safe without it.
 3. `notify()` with the terminal channel, and `human-liaison` with the standard format. (done)
-4. `factory-planner` and issue creation from an MVP doc, with my approval of the issue list.
+4. `factory-planner` and issue creation from an MVP doc, with my approval of the issue list. (done)
 5. Run loop with `issue-selector`, the ship recipe, manual merge, and the usage gate with pause and resume.
 6. Auto-merge, CI wait, `ci-fix` recipe.
 7. `question-resolver`, `conflict-resolve`, `harness-cleanup`.
