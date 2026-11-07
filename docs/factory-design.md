@@ -284,6 +284,12 @@ This boundary must always hold.
   harnesses and roles missing their branch fields, writes the marker with this process's pid, runs the command in
   the project root with the nonce exported, forwards signals, and deletes the marker on exit. Every launch first
   prunes stale markers; `harness factory cleanup` does only that.
+- Workers that need a branch (`engineer`, `ci-fixer`, `conflict-resolver`) run as their own sessions, launched by
+  the manager with `harness factory launch --role <role> --<branch flags> -- claude -p ...`, so each gets its own
+  marker with its branch fields; Task subagents can't carry per-worker markers. A session whose marker role is not
+  `manager` is held to that role's rules like a subagent (it has no `agent_type`, so the guard uses the marker
+  role), even outside the project. `ci-fixer` may also add and commit on its `pr_branch`, since its fix has to be
+  committed before it pushes.
 - In factory mode the guard denies Bash, Write, Edit and notebook calls that mention or reach `~/.software-factory`.
   That is best effort against a process running as the same user. The real barrier is a `permissions.deny` rule in
   user settings for `Write`/`Edit` on `~/.software-factory/**`; add it when the launcher ships.
@@ -335,9 +341,8 @@ in `~/.claude-personal`, the README and `scripts/claude-accounts.sh`.
 ## 15. Open items
 
 - Phone push notifications do not arrive (section 7, "Phone access"). Revisit when fixed.
-- Wire the launcher into the run loop: the manager session and the per-role worker sessions still need to be started with `harness factory launch` (see issue #15 for the per-worker design).
-- Per-worker `pr_branch`/`issue_branch` cannot be written by a launcher for Task subagents. Either launch
-  workers as separate sessions with their own marker, or give each worker a worktree and derive the branch there.
+- Wire the launcher into the run loop: the manager session and the per-role worker sessions still need to be started with `harness factory launch`.
+- `ci-fixer` is meant to comment on the PR, but `gh pr comment` is blocked for subagents and worker sessions.
 - The hooks treat a missing `agent_type` as the main session and a main session run with `--agent` as a
   subagent. Check the payload for both before relying on it.
 - Confirm what the usage probe reports when I am near or over a limit (the `status` field values are unseen).

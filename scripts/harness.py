@@ -858,7 +858,7 @@ NONCE_RE = re.compile(r"^[A-Za-z0-9]{32}$")
 FACTORY_ROLES = {  # role -> actions it may take
     "manager": {"push", "pr_create", "pr_merge"},
     "engineer": {"add", "commit"},
-    "ci-fixer": {"push"},
+    "ci-fixer": {"push", "add", "commit"},
     "conflict-resolver": {"push", "merge", "add", "commit"},
 }
 FACTORY_BRANCH_KEY = {"engineer": "issue_branch", "ci-fixer": "pr_branch", "conflict-resolver": "pr_branch"}
@@ -878,8 +878,8 @@ def within(path: str | None, root: str) -> bool:
         return False
 
 
-def load_marker(cwd: str | None) -> dict | None:
-    """The valid factory marker for this cwd, or None. Fails closed on anything off."""
+def load_marker(cwd: str | None, scoped: bool = True) -> dict | None:
+    """The valid factory marker (for this cwd when `scoped`), or None. Fails closed on anything off."""
     nonce = os.environ.get(MARKER_ENV, "")
     if not NONCE_RE.match(nonce):
         return None
@@ -892,7 +892,7 @@ def load_marker(cwd: str | None) -> dict | None:
         os.kill(int(m["pid"]), 0)
         if not (0 <= time.time() - float(m["started"]) <= MARKER_TTL):
             return None
-        if not isinstance(m.get("project"), str) or not within(cwd, m["project"]):
+        if not isinstance(m.get("project"), str) or (scoped and not within(cwd, m["project"])):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -919,10 +919,18 @@ def factory_permission(marker: dict | None, agent_type: str | None, cwd: str | N
 
 
 def factory_context(payload: dict) -> dict | None:
-    marker = load_marker(payload.get("cwd"))
+    """The factory marker plus the effective role. A worker session launched with its own marker (role other than
+    manager) is held to that role's rules like a subagent, so it can't use the main session's wider powers, even
+    after leaving the project (the lifts re-check the cwd)."""
+    marker = load_marker(payload.get("cwd"), scoped=False)
     if not marker:
         return None
-    return {"marker": marker, "agent_type": payload.get("agent_type") or None, "cwd": payload.get("cwd")}
+    agent = payload.get("agent_type") or (marker.get("role") if marker.get("role") != "manager" else None)
+    return {"marker": marker, "agent_type": agent or None, "cwd": payload.get("cwd")}
+
+
+def is_subagent(payload: dict, factory: dict | None) -> bool:
+    return bool(factory["agent_type"]) if factory else bool(payload.get("agent_type"))
 
 
 def marker_tamper_denial(payload: dict, factory: dict | None) -> str | None:
@@ -1227,7 +1235,7 @@ def hook_guard_github(cfg):
     cmd = (payload.get("tool_input") or {}).get("command", "")
     factory = factory_context(payload)
     reason = marker_tamper_denial(payload, factory) or \
-        check_github_global(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")), factory=factory)
+        check_github_global(cmd, cfg, payload.get("cwd"), subagent=is_subagent(payload, factory), factory=factory)
     if reason:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
@@ -1239,7 +1247,7 @@ def hook_guard_bash(cfg):
     cmd = (payload.get("tool_input") or {}).get("command", "")
     factory = factory_context(payload)
     reason = marker_tamper_denial(payload, factory) or \
-        check_bash(cmd, cfg, payload.get("cwd"), subagent=bool(payload.get("agent_type")), factory=factory)
+        check_bash(cmd, cfg, payload.get("cwd"), subagent=is_subagent(payload, factory), factory=factory)
     if reason:
         log_event({"kind": "guard_block", "run_id": current_run_id(),
                    "stage": (payload.get("agent_type") or "manager").split(":")[-1], "command": cmd[:300], "reason": reason})
