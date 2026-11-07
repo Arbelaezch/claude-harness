@@ -94,7 +94,7 @@ def run_loop(*, gate: Callable[[], str], fetch_issues: Callable[[], list[dict]],
              select: Callable[[list[dict]], tuple[int, str]], set_state: Callable[[int, str], None],
              run_issue: Callable[[int], int], fetch_labels: Callable[[int], set[str]],
              raise_blocker: Callable[[str, int | None, str], None], log: Callable[[dict], None],
-             max_issues: int = 20) -> dict:
+             max_issues: int = 20, should_stop: Callable[[], bool] = lambda: False) -> dict:
     """Work the pool one issue at a time until it is empty. Returns {"results": [...], "stopped": reason|None}."""
     results, attempted, stopped = [], set(), None
     for i in fetch_issues():  # a crashed earlier run leaves issues in-progress; never guess, hand them back
@@ -104,6 +104,9 @@ def run_loop(*, gate: Callable[[], str], fetch_issues: Callable[[], list[dict]],
                           i["number"], "Check the branch, then relabel the issue `todo` to retry or close it.")
             log({"kind": "orphan_blocked", "issue": i["number"]})
     while len(results) < max_issues:
+        if should_stop():  # asked to stop after the current issue
+            stopped = "stop requested"
+            break
         if gate() == "stop":
             raise_blocker("Plan usage could not be read three times in a row, so the factory stopped.", None,
                           "Check the statusline capture or run `usage.py --probe`, then start the factory again.")

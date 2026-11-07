@@ -279,6 +279,16 @@ How it is built (step 5, decided 2026/11/06)
   A session that ends in neither state is marked `blocked` by the supervisor.
 - Questions are asynchronous: they arrive on the terminal, I answer with `harness factory decide` and relabel the
   issue `todo`. Replying live from the phone needs the interactive manager and the push fix, and is not part of v1.
+- The front door is `/factory` (skill), a thin conversation with the manager: "work on 12 and 13", "status",
+  an answer to a blocked issue, "stop". It calls `harness factory start | status | stop | queue | decide` and
+  never does the work. `start` launches `factory run` detached (own session, under `caffeinate`, lock in
+  `.factory/supervisor.json`, output in `.factory/supervisor.log`), so the manager conversation can be cleared or
+  closed at any time. `status` rebuilds the picture from labels and files: supervisor, usage snapshot, the current
+  issue with a stage read from its run directory (scouting, implementing k/n, review round n) and the last lines
+  of its session log, blocked and awaiting-merge issues, recent events. The supervisor appends one short line per
+  event to `.factory/events.log`; the manager watches it with the Monitor tool and relays blockers and questions.
+  `stop` finishes the current issue first; `stop --now` signals the supervisor, and the interrupted issue becomes
+  `blocked` at the next start. Typing `harness factory run` directly still works but is not the intended path.
 - Merging stays manual. `--merge auto` is refused until step 6.
 - Tunables are in `[factory]` in `scripts/defaults.toml` (usage limits, the unknown-reading limit, and the
   `claude_args` passed to each headless session; it defaults to `--permission-mode acceptEdits`).
