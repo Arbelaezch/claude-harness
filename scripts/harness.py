@@ -14,8 +14,10 @@ import datetime as dt
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -2952,6 +2954,87 @@ def cmd_init(a, cfg):
 
 
 # --------------------------------------------------------------------------- accounts
+# Factory launcher: writes the marker the guard looks for (see load_marker), runs a command with the nonce
+# exported, and removes the marker on exit.
+FACTORY_ROLE_FIELDS = {  # role -> marker fields it must be launched with
+    "manager": (),
+    "engineer": ("issue_branch",),
+    "ci-fixer": ("pr_branch",),
+    "conflict-resolver": ("pr_branch", "base_branch"),
+}
+
+
+def write_marker(project: str, role: str, fields: dict) -> tuple[str, Path]:
+    """Create a fresh marker (0600, in a 0700 dir) for this process; returns (nonce, path)."""
+    d = marker_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    nonce = secrets.token_hex(16)
+    path = d / f"{nonce}.json"
+    body = {"project": os.path.realpath(project), "pid": os.getpid(), "started": time.time(), "role": role,
+            **{k: v for k, v in fields.items() if v}}
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(body, f)
+    return nonce, path
+
+
+def prune_markers() -> int:
+    """Delete markers whose launcher is gone, that are expired, or that can't be read. Returns how many."""
+    removed = 0
+    d = marker_dir()
+    for f in d.glob("*.json") if d.is_dir() else []:
+        if not NONCE_RE.match(f.stem):
+            continue
+        try:
+            m = json.loads(f.read_text())
+            os.kill(int(m["pid"]), 0)
+            stale = not (0 <= time.time() - float(m["started"]) <= MARKER_TTL)
+        except PermissionError:
+            stale = False  # pid exists, owned by someone else
+        except (OSError, ValueError, KeyError, TypeError):
+            stale = True
+        if stale:
+            f.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def run_factory(project: str, role: str, fields: dict, command: list[str]) -> int:
+    """Run `command` in `project` with factory mode on; the marker lives exactly as long as the command."""
+    prune_markers()
+    nonce, path = write_marker(project, role, fields)
+    child = None
+
+    def forward(signum, _frame):
+        if child and child.poll() is None:
+            child.send_signal(signum)
+
+    old = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        child = subprocess.Popen(command, cwd=project, env={**os.environ, MARKER_ENV: nonce})
+        return child.wait()
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+        path.unlink(missing_ok=True)
+
+
+def cmd_factory(a, cfg):
+    if a.action == "cleanup":
+        print(f"removed {prune_markers()} stale marker(s)")
+        return
+    if cfg.get("mode") == "professional":
+        sys.exit("This project is a professional harness (mode = professional); the factory can't run here.")
+    fields = {k: getattr(a, k) for k in ("pr_branch", "issue_branch", "base_branch")}
+    missing = [f"--{k.replace('_', '-')}" for k in FACTORY_ROLE_FIELDS[a.role] if not fields[k]]
+    if missing:
+        sys.exit(f"role {a.role} needs {', '.join(missing)}")
+    fields = {k: v for k, v in fields.items() if k in FACTORY_ROLE_FIELDS[a.role]}
+    command = a.command[1:] if a.command[:1] == ["--"] else a.command
+    sys.exit(run_factory(str(ROOT), a.role, fields, command or ["claude"]))
+
+
 def cmd_account(a, cfg):
     """Prints '<account>|<config dir>' for the project at the current directory (dir empty = default
     ~/.claude). Prints nothing outside harness projects. Used by scripts/claude-accounts.sh."""
@@ -3198,6 +3281,18 @@ def main(argv=None):
     s = sub.add_parser("account", help="(used by the claude shell function) which Claude account this project uses")
     s.add_argument("--dir-for", help="print the config dir for a named account")
     s.set_defaults(fn=cmd_account)
+
+    s = sub.add_parser("factory", help="run a command (default: claude) with factory mode on for this project")
+    fsub = s.add_subparsers(dest="action", required=True)
+    f = fsub.add_parser("launch", help="write the marker, run the command, remove the marker on exit")
+    f.add_argument("--role", choices=sorted(FACTORY_ROLE_FIELDS), default="manager")
+    f.add_argument("--pr-branch")
+    f.add_argument("--issue-branch")
+    f.add_argument("--base-branch")
+    f.add_argument("command", nargs=argparse.REMAINDER, help="-- <command...> (default: claude)")
+    f.set_defaults(fn=cmd_factory)
+    f = fsub.add_parser("cleanup", help="delete stale markers left by crashed launches")
+    f.set_defaults(fn=cmd_factory)
 
     s = sub.add_parser("doctor", help="check the setup")
     s.add_argument("--ping", action="store_true", help="also send a tiny request to the reviewer API")

@@ -183,6 +183,43 @@ class FactoryGuardTests(unittest.TestCase):
         self.marker()
         self.assertIn("blocked for subagents", self.bash("gh pr merge 3", "harness:ci-fixer"))
 
+    def test_launcher_writes_and_removes_marker(self):
+        probe = ("import os,sys,json;"
+                 "p=os.environ['SOFTWARE_FACTORY_HOME']+'/.software-factory/markers/'+os.environ['SOFTWARE_FACTORY_MARKER']+'.json';"
+                 "m=json.load(open(p));"
+                 "sys.exit(7 if m['role']=='ci-fixer' and m['pr_branch']=='feat/x' and (os.stat(p).st_mode&0o777)==0o600 else 3)")
+        os.environ.pop(h.MARKER_ENV)
+        rc = h.run_factory(self.project, "ci-fixer", {"pr_branch": "feat/x", "issue_branch": None}, ["python3", "-c", probe])
+        self.assertEqual(rc, 7)
+        self.assertEqual(list(h.marker_dir().glob("*.json")), [])
+
+    def test_launcher_marker_is_accepted_by_the_guard(self):
+        nonce, path = h.write_marker(self.project, "engineer", {"issue_branch": "feat/x"})
+        self.addCleanup(path.unlink, missing_ok=True)
+        with mock.patch.dict(os.environ, {h.MARKER_ENV: nonce}):
+            self.assertEqual(h.load_marker(self.project)["role"], "engineer")
+            self.assertIsNone(self.bash("git commit -m x", "harness:engineer"))
+            self.assertIsNone(h.load_marker(os.path.join(self.home, "p", "app2")))
+
+    def test_launcher_removes_marker_when_command_fails(self):
+        self.assertEqual(h.run_factory(self.project, "manager", {}, ["python3", "-c", "raise SystemExit(5)"]), 5)
+        self.assertEqual(list(h.marker_dir().glob("*.json")), [])
+
+    def test_prune_removes_only_stale_markers(self):
+        live, lp = h.write_marker(self.project, "manager", {})
+        old = {"project": self.project, "pid": os.getpid(), "started": time.time() - 10 ** 6, "role": "manager"}
+        dead = {**old, "started": time.time(), "pid": 2 ** 22 + 12345}
+        for name, body in (("b" * 32, old), ("c" * 32, dead)):
+            (h.marker_dir() / f"{name}.json").write_text(json.dumps(body))
+        (h.marker_dir() / ("d" * 32 + ".json")).write_text("not json")
+        (h.marker_dir() / "notes.json").write_text("{}")
+        self.assertEqual(h.prune_markers(), 3)
+        self.assertEqual(sorted(f.name for f in h.marker_dir().glob("*.json")), sorted([lp.name, "notes.json"]))
+
+    def test_launcher_needs_branch_fields_per_role(self):
+        self.assertEqual(h.FACTORY_ROLE_FIELDS["conflict-resolver"], ("pr_branch", "base_branch"))
+        self.assertEqual(set(h.FACTORY_ROLE_FIELDS), set(h.FACTORY_ROLES))
+
     def hook(self, fn, tool_input, agent=None, cwd=None):
         payload = json.dumps({"cwd": cwd or self.project, "agent_type": agent, "tool_input": tool_input})
         out = io.StringIO()
