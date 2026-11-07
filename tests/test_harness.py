@@ -349,5 +349,69 @@ class ShellParsingTests(unittest.TestCase):
             self.assertTrue(any(self.guard(cmd)), cmd)
 
 
+class NotifyTests(unittest.TestCase):
+    def msg(self, **kw):
+        base = dict(kind="BLOCKER", project="Callback", issue=12, situation="CI failed twice on the PR. The fix did not help.",
+                    need="Decide whether to retry or close the PR.", options=["Retry once more", "Close the PR"],
+                    recommended=2, detail="https://example.test/log")
+        return h.format_message(**{**base, **kw})
+
+    def test_standard_shape(self):
+        out = self.msg()
+        self.assertEqual(out.splitlines(), [
+            "[BLOCKER]  Callback #12",
+            "What is going on:   CI failed twice on the PR. The fix did not help.",
+            "What I need:        Decide whether to retry or close the PR.",
+            "Options:", "  1. Retry once more", "  2. Close the PR  (recommended)",
+            "Detail:             https://example.test/log"])
+
+    def test_done_needs_no_decision(self):
+        out = self.msg(kind="done", need="", options=None, recommended=None, detail="", issue="#7")
+        self.assertIn("[DONE]  Callback #7", out)
+        self.assertIn("Nothing, for your information.", out)
+        self.assertNotIn("Options", out)
+
+    def test_bad_messages_are_rejected(self):
+        for kw in ({"kind": "FYI"}, {"situation": "One. Two. Three. Four."}, {"situation": " "}, {"need": ""},
+                   {"need": "a\nb"}, {"options": ["only one"], "recommended": 1}, {"options": list("abcd"), "recommended": 1},
+                   {"recommended": None}, {"recommended": 3}, {"kind": "DONE", "need": ""}):
+            with self.assertRaises(ValueError, msg=kw):
+                self.msg(**kw)
+        with self.assertRaises(ValueError):
+            self.msg(options=None, recommended=2)
+
+    def test_sentence_count(self):
+        self.assertEqual(h.count_sentences("One. Two! Three? Four."), 4)
+        self.assertEqual(h.count_sentences("Version 1.2 failed in step 3."), 1)
+
+    def test_notify_terminal_and_unknown_channels(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            h.notify("hello")
+        self.assertIn("hello", out.getvalue())
+        with self.assertRaises(ValueError):
+            h.notify("x", ("pager",))
+
+    def test_push_is_scaffolding_and_never_loses_the_message(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            h.notify("hello", ("push",))
+        self.assertIn("hello", out.getvalue())
+        self.assertIn("not built", err.getvalue())
+
+    def test_a_new_channel_is_one_class(self):
+        got = []
+
+        class Memory(h.Channel):
+            name = "memory"
+
+            def send(self, text):
+                got.append(text)
+
+        with mock.patch.dict(h.CHANNELS, {"memory": Memory}), contextlib.redirect_stdout(io.StringIO()):
+            h.notify("hi", ("memory",))
+        self.assertEqual(got, ["hi"])
+
+
 if __name__ == "__main__":
     unittest.main()
