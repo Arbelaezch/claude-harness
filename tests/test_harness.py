@@ -144,6 +144,22 @@ class FactoryGuardTests(unittest.TestCase):
         self.branch = "main"
         self.assertIsNotNone(self.bash("git commit -m x", "harness:engineer"))
 
+    def test_conflict_resolver_merges_base_into_pr_branch(self):
+        self.marker(base_branch="develop")
+        r = "harness:conflict-resolver"
+        for cmd in ("git merge origin/develop", "git merge --no-edit origin/develop", "git merge --abort",
+                    "git add a.py", "git commit --no-edit", "git push origin feat/x"):
+            self.assertIsNone(self.bash(cmd, r), cmd)
+        for cmd in ("git merge origin/other", "git merge --squash origin/develop", "git merge -X theirs origin/develop",
+                    "git merge feat/y", "git rebase origin/develop", "git add -A", "git push --force origin feat/x"):
+            self.assertIsNotNone(self.bash(cmd, r), cmd)
+        self.branch = "other"
+        self.assertIsNotNone(self.bash("git merge origin/develop", r))
+        self.branch = "feat/x"
+        self.assertIsNotNone(self.bash("git merge origin/develop", "harness:engineer"))
+        self.account = "other"
+        self.assertIn("isn't in [github].write_accounts", self.bash("git merge origin/develop", r))
+
     def test_other_roles_get_nothing(self):
         self.marker()
         for agent in ("harness:scout", "harness:planner", "harness:claude-reviewer", "harness:verifier", "harness:unknown"):

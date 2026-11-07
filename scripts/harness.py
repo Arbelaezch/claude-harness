@@ -857,7 +857,7 @@ FACTORY_ROLES = {  # role -> actions it may take
     "manager": {"push", "pr_create", "pr_merge"},
     "engineer": {"add", "commit"},
     "ci-fixer": {"push"},
-    "conflict-resolver": {"push"},
+    "conflict-resolver": {"push", "merge", "add", "commit"},
 }
 FACTORY_BRANCH_KEY = {"engineer": "issue_branch", "ci-fixer": "pr_branch", "conflict-resolver": "pr_branch"}
 
@@ -945,9 +945,15 @@ def factory_push_ok(args: list[str], target: str | None, factory: dict) -> bool:
 
 
 def factory_commit_ok(sub: str, args: list[str], target: str | None, factory: dict | None) -> bool:
-    """Factory engineer: `git add <paths>` / `git commit` on its issue branch, no blanket adds, no skipped hooks."""
+    """Factory engineer / conflict-resolver: `git add <paths>`, `git commit` and (resolver only) merging the marker's
+    base branch, on their own branch; no blanket adds, no skipped hooks."""
     if not factory or not within(target, factory["marker"]["project"]):
         return False
+    if sub == "merge":
+        base = factory["marker"].get("base_branch")
+        ok = args == ["--abort"] or (bool(base) and [a for a in args if a != "--no-edit"] == [f"origin/{base}"])
+        if not ok:
+            return False
     if sub == "add" and any(a in ("-A", "--all", ".", "-u", "--update", "-f", "--force") for a in args):
         return False
     if sub == "commit" and any(a in ("--no-verify", "--no-gpg-sign") or re.match(r"^-[a-zA-Z]*n[a-zA-Z]*$", a)
@@ -1145,8 +1151,8 @@ def check_bash(command: str, cfg: dict, cwd: str | None = None, subagent: bool =
                 return f"`git pull` is blocked for subagents. {SUBAGENT_BLOCKED['pull']}"
             if sub == "stash":
                 return f"`git stash` is blocked for subagents. {SUBAGENT_BLOCKED['stash']}"
-            if sub in ("commit", "add") and factory_commit_ok(sub, args, target, factory):
-                pass  # factory engineer on its issue branch; the account check below still applies
+            if sub in ("commit", "add", "merge") and factory_commit_ok(sub, args, target, factory):
+                pass  # factory engineer/resolver on its own branch; the account check below still applies
             elif sub in GIT_WRITER_ONLY and (mode != "commit" or sub not in ("commit", "add")):
                 hint = " (Set git.mode = \"commit\" in `.claude/harness.toml` to let the engineer commit.)" if sub in ("commit", "add") else ""
                 return f"`git {sub}` is blocked for subagents. {SUBAGENT_BLOCKED[sub]}{hint}"
