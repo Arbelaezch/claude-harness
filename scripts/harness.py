@@ -3784,7 +3784,10 @@ def run_factory_loop(a, cfg, fl, usage, fc, slug, fetch):
 
     sessions = ROOT / ".factory" / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
-    claude_args = fc.get("claude_args", ["--permission-mode", "acceptEdits"])
+    claude_args = list(fc.get("claude_args", ["--permission-mode", "acceptEdits"]))
+    plugin_root = str(Path(__file__).resolve().parent.parent)
+    if "--add-dir" not in claude_args:  # headless sessions must read the plugin's skills (/ship) and agents
+        claude_args += ["--add-dir", plugin_root]
     limits = {"five_hour": float(fc.get("max_five_hour", 80)), "seven_day": float(fc.get("max_weekly", 90))}
 
     def ask_selector(pool):

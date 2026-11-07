@@ -25,8 +25,8 @@ Read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for issue `#N`, 
 changes where humans were involved.
 
 1. **No grill, no plan checkpoint.** Skip steps 1 and 4 of /ship: the documents were reviewed and answers recorded
-   in `.factory/decisions.md` before the issue existed. Treat the plan as approved. Read that decisions file and the
-   issue's linked documents before planning; pass the relevant decisions to the planner and engineers.
+   in `.factory/decisions.md` before the issue existed. Treat the plan as approved. Read that decisions file (if it exists; a project
+   with no recorded decisions has none) and the issue's linked documents before planning; pass the relevant decisions to the planner and engineers.
 2. **Nobody to ask.** Never use AskUserQuestion. Where /ship says to ask the user or relay `NEEDS USER`, first see
    whether `.factory/decisions.md` or the issue's documents settle it (quote the line when you use it). If they
    do, continue. If they don't:

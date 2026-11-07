@@ -236,7 +236,8 @@ class HarnessWiringTests(unittest.TestCase):
             text = logs[0].read_text()
             events = [json.loads(x)["kind"] for x in (root / ".factory" / "log.jsonl").read_text().splitlines()]
             left = list((Path(tmp) / ".software-factory" / "markers").glob("*.json"))
-        self.assertIn("args: -p /factory-issue 4 --permission-mode acceptEdits", text)
+        self.assertIn("args: -p /factory-issue 4 --permission-mode acceptEdits --add-dir", text)
+        self.assertIn(str(SCRIPTS.parent), text)  # the plugin root is readable by the headless session
         self.assertIn("marker set: yes", text)
         self.assertEqual(text.splitlines()[-1].strip(), "1")  # exactly one marker while the session ran
         self.assertEqual(left, [])
