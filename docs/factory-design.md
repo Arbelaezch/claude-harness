@@ -295,8 +295,12 @@ This boundary must always hold.
   with `--agent` has `agent_type` only. Keying on `agent_type` would have treated a `--agent` manager as a subagent.
   Nested subagents were not tested.
 - In factory mode the guard denies Bash, Write, Edit and notebook calls that mention or reach `~/.software-factory`.
-  That is best effort against a process running as the same user. The real barrier is a `permissions.deny` rule in
-  user settings for `Write`/`Edit` on `~/.software-factory/**`; add it when the launcher ships.
+  That is best effort against a process running as the same user. The real barrier is a manual one-time install
+  in `~/.claude/settings.json` (user settings; the plugin can't ship it):
+  `"permissions": {"deny": ["Edit(~/.software-factory/**)", "Write(~/.software-factory/**)",
+  "NotebookEdit(~/.software-factory/**)", "Bash(*.software-factory*)"]}`. It also blocks harmless commands that
+  mention the folder (like `ls`) in Claude sessions; run those from a separate terminal. The launcher is a separate
+  process and is unaffected. Check with `/permissions`, then try a write into the folder.
 - In factory mode a subagent may not use `git -c`, `--git-dir` or `--work-tree`, or write `git config`, since those
   can redirect a push to another repo or URL.
 - The guard defaults to deny. Without the marker, or outside that directory, behaviour is today's.
