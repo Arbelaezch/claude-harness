@@ -413,5 +413,116 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(got, ["hi"])
 
 
+def issue(key, deps=(), **kw):
+    return {"key": key, "title": f"Do {key}", "body": f"Body of {key}.", "acceptance": [f"{key} works"],
+            "depends_on": list(deps), **kw}
+
+
+class IssuePlanTests(unittest.TestCase):
+    def test_valid_plan_and_order(self):
+        plan = {"issues": [issue("c", ["b"]), issue("a"), issue("b", ["a"])]}
+        self.assertEqual(h.validate_issue_plan(plan), [])
+        self.assertEqual(h.issue_order(plan), ["a", "b", "c"])
+
+    def test_problems_are_reported(self):
+        def errs(*issues):
+            return " | ".join(h.validate_issue_plan({"issues": list(issues)}))
+        self.assertIn("at least one", errs())
+        self.assertIn("duplicate key", errs(issue("a"), issue("a", title="Other")))
+        self.assertIn("share a title", errs(issue("a", title="Same"), issue("b", title="Same")))
+        self.assertIn("unknown key", errs(issue("a", ["zzz"])))
+        self.assertIn("depends on itself", errs(issue("a", ["a"])))
+        self.assertIn("cycle", errs(issue("a", ["b"]), issue("b", ["a"])))
+        self.assertIn("acceptance", errs(issue("a", acceptance=[])))
+        self.assertIn("acceptance", errs(issue("a", acceptance=["ok", " "])))
+        self.assertIn("body", errs(issue("a", body=" ")))
+        self.assertIn("title", errs(issue("a", title="x")))
+        self.assertIn("key", errs(issue("Bad Key")))
+        self.assertIn("labels", errs(issue("a", labels="enhancement")))
+        self.assertIn("must be an object", errs("nope"))
+        self.assertIn("at least one", " ".join(h.validate_issue_plan([])))
+
+    def test_body_has_criteria_and_dependencies(self):
+        body = h.render_issue_body(issue("b", ["a"]), {"a": 7})
+        self.assertIn("## Acceptance criteria\n- [ ] b works", body)
+        self.assertTrue(body.rstrip().endswith("Depends on #7"))
+        self.assertNotIn("Depends on", h.render_issue_body(issue("a"), {}))
+
+    def setUp(self):
+        self.out = io.StringIO()
+
+    def run_create(self, plan, existing=(), dry_run=False, have_labels=("enhancement", "bug")):
+        calls = []
+
+        def fake_gh(*args, input_text=None, **kw):
+            calls.append((args, input_text))
+            return f"https://github.com/o/r/issues/{100 + sum(1 for c, _ in calls if c[:2] == ('issue', 'create'))}\n"
+
+        def fake_json(*args):
+            if args[:2] == ("label", "list"):
+                return [{"name": n} for n in have_labels]
+            return [{"title": t, "number": n} for t, n in existing]
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(h, "ROOT", Path(tmp)), \
+                mock.patch.object(h, "gh", fake_gh), mock.patch.object(h, "gh_json", fake_json), \
+                mock.patch.object(h, "slug_of", lambda cfg, r: "o/r"), mock.patch.object(h, "repos", lambda cfg: {"app": {}}), \
+                mock.patch.object(h, "load_issue_plan", lambda f: plan), contextlib.redirect_stdout(self.out):
+            a = mock.Mock(file="x", repo=None, dry_run=dry_run)
+            h.cmd_factory_issues_create(a, {})
+            log = (Path(tmp) / ".factory" / "log.jsonl")
+            logged = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
+        return calls, logged
+
+    def test_create_makes_dependencies_first_and_links_numbers(self):
+        plan = {"issues": [issue("b", ["a"]), issue("a")]}
+        calls, logged = self.run_create(plan)
+        creates = [(c, body) for c, body in calls if c[:2] == ("issue", "create")]
+        self.assertEqual([c[c.index("--title") + 1] for c, _ in creates], ["Do a", "Do b"])
+        self.assertIn("Depends on #101", creates[1][1])
+        self.assertNotIn("todo", [c[i + 1] for c, _ in creates for i, x in enumerate(c) if x == "--label"])
+        self.assertEqual([(e["key"], e["number"]) for e in logged], [("a", 101), ("b", 102)])
+
+    def test_create_skips_existing_titles(self):
+        plan = {"issues": [issue("b", ["a"]), issue("a")]}
+        calls, logged = self.run_create(plan, existing=[("Do a", 5)])
+        creates = [(c, body) for c, body in calls if c[:2] == ("issue", "create")]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("Depends on #5", creates[0][1])
+        self.assertNotIn("todo", creates[0][0])  # the user names the issues to run; creation never queues them
+
+    def test_missing_non_factory_label_is_an_error(self):
+        with self.assertRaises(RuntimeError):
+            self.run_create({"issues": [issue("a", labels=["wizardry"])]})
+
+    def test_dry_run_creates_nothing_and_prints_the_order(self):
+        calls, logged = self.run_create({"issues": [issue("b", ["a"]), issue("a")]}, dry_run=True)
+        self.assertEqual((calls, logged), ([], []))
+        self.assertIn("2 issues would be created", self.out.getvalue())
+
+    def test_problems_stop_creation_before_anything_is_made(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "i.json"
+            f.write_text(json.dumps({"issues": [issue("a", ["b"]), issue("b", ["a"])]}))
+            with self.assertRaises(SystemExit) as cm, mock.patch.object(h, "gh") as gh:
+                h.load_issue_plan(str(f))
+            self.assertIn("cycle", str(cm.exception))
+            gh.assert_not_called()
+
+    def test_decide_appends_to_the_decisions_file(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(h, "ROOT", Path(tmp)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for q, by in (("Who can delete a resume?", "user"), ("Max upload size?", "assumed")):
+                h.cmd_factory_decide(mock.Mock(question=q, answer="Only the owner.\nAlways.", by=by, kind="product",
+                                               why="vision doc", source="MVP.md:12"), {})
+            text = (Path(tmp) / ".factory" / "decisions.md").read_text()
+            log = (Path(tmp) / ".factory" / "log.jsonl").read_text().splitlines()
+        self.assertEqual(text.count("# Decisions"), 1)
+        self.assertIn("## Who can delete a resume?", text)
+        self.assertIn("- Decision: Only the owner. Always.", text)
+        self.assertIn("- Decided by: assumed on ", text)
+        self.assertIn("- Source: MVP.md:12", text)
+        self.assertEqual(len(log), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

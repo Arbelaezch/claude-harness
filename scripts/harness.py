@@ -3304,6 +3304,178 @@ def cmd_notify(a, cfg):
     log_event({"kind": "notify", "message_kind": a.kind.upper(), "issue": a.issue or "", "channels": a.channel or ["terminal"]})
 
 
+# Factory issue planning (docs/factory-design.md section 4, 8 and 12 step 4). The factory-planner agent writes an
+# issues.json draft from the MVP doc; the user approves it; `factory issues-create` turns it into GitHub issues,
+# dependencies first, with "Depends on #N" lines for the issue-selector.
+FACTORY_LABELS = {  # section 8
+    "todo": ("0e8a16", "In the factory's candidate pool"),
+    "in-progress": ("fbca04", "A harness is running on it"),
+    "awaiting-merge": ("1d76db", "PR open, waiting on CI or review"),
+    "blocked": ("b60205", "Raised to the user"),
+    "backlog": ("c5def5", "Created by cleanup; not worked until labelled todo"),
+}
+ISSUE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def validate_issue_plan(plan) -> list[str]:
+    """Every problem with a drafted issue list, as readable strings (empty = good)."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("issues"), list) or not plan["issues"]:
+        return ["the file must be {\"issues\": [...]} with at least one issue"]
+    errors, keys = [], {}
+    for n, it in enumerate(plan["issues"], 1):
+        if not isinstance(it, dict):
+            errors.append(f"issue {n}: must be an object")
+            continue
+        key = it.get("key")
+        who = f"issue {key!r}" if isinstance(key, str) else f"issue {n}"
+        if not isinstance(key, str) or not ISSUE_KEY_RE.match(key):
+            errors.append(f"{who}: key must be lowercase letters, digits and dashes (max 40)")
+        elif key in keys:
+            errors.append(f"{who}: duplicate key")
+        else:
+            keys[key] = it
+        title = it.get("title")
+        if not isinstance(title, str) or not 3 <= len(title.strip()) <= 100:
+            errors.append(f"{who}: title must be 3 to 100 characters")
+        if not isinstance(it.get("body"), str) or not it["body"].strip():
+            errors.append(f"{who}: body is required (context and scope)")
+        ac = it.get("acceptance")
+        if not isinstance(ac, list) or not ac or not all(isinstance(x, str) and x.strip() for x in ac):
+            errors.append(f"{who}: acceptance needs at least one non-empty criterion")
+        for field in ("depends_on", "labels"):
+            v = it.get(field, [])
+            if not isinstance(v, list) or not all(isinstance(x, str) and x.strip() for x in v):
+                errors.append(f"{who}: {field} must be a list of strings")
+    titles = [i["title"].strip().lower() for i in keys.values() if isinstance(i.get("title"), str)]
+    if len(titles) != len(set(titles)):
+        errors.append("two issues share a title")
+    for key, it in keys.items():
+        for d in it.get("depends_on") or []:
+            if d == key:
+                errors.append(f"issue {key!r}: depends on itself")
+            elif d not in keys:
+                errors.append(f"issue {key!r}: depends on unknown key {d!r}")
+    if not errors and len(issue_order(plan)) != len(keys):
+        errors.append("dependencies form a cycle")
+    return errors
+
+
+def issue_order(plan: dict) -> list[str]:
+    """Keys with every issue after the ones it depends on (Kahn); stops short when there is a cycle."""
+    deps = {i["key"]: set(i.get("depends_on") or []) for i in plan["issues"]}
+    order = []
+    while deps:
+        ready = sorted(k for k, d in deps.items() if not (d & set(deps)))
+        if not ready:
+            break
+        for k in ready:
+            order.append(k)
+            del deps[k]
+    return order
+
+
+def render_issue_body(it: dict, numbers: dict[str, int]) -> str:
+    parts = [it["body"].strip(), "## Acceptance criteria\n" + "\n".join(f"- [ ] {x.strip()}" for x in it["acceptance"])]
+    deps = [f"Depends on #{numbers[d]}" for d in it.get("depends_on") or []]
+    if deps:
+        parts.append("\n".join(deps))
+    return "\n\n".join(parts) + "\n"
+
+
+def factory_log(event: dict) -> None:
+    """Append-only factory log in the target project (section 8)."""
+    d = ROOT / ".factory"
+    d.mkdir(exist_ok=True)
+    with open(d / "log.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": iso(), **event}, ensure_ascii=False) + "\n")
+
+
+def factory_repo(a, cfg) -> str:
+    names = list(repos(cfg))
+    name = a.repo or (names[0] if len(names) == 1 else None)
+    if not name:
+        sys.exit(f"this project has several repos; pass --repo ({', '.join(names)})")
+    return slug_of(cfg, name)
+
+
+def load_issue_plan(path: str) -> dict:
+    try:
+        plan = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        sys.exit(f"can't read {path}: {exc}")
+    errors = validate_issue_plan(plan)
+    if errors:
+        sys.exit("issue list problems:\n" + "\n".join(f"  - {e}" for e in errors))
+    return plan
+
+
+def ensure_labels(slug: str, wanted: set[str]) -> None:
+    have = {x["name"] for x in gh_json("label", "list", "--repo", slug, "--limit", "200", "--json", "name") or []}
+    for name in sorted(wanted - have):
+        if name in FACTORY_LABELS:
+            color, desc = FACTORY_LABELS[name]
+            gh("label", "create", name, "--repo", slug, "--color", color, "--description", desc)
+        else:
+            raise RuntimeError(f"label '{name}' doesn't exist in {slug}; create it or change the issue's labels")
+
+
+def cmd_factory_labels(a, cfg):
+    slug = factory_repo(a, cfg)
+    ensure_labels(slug, set(FACTORY_LABELS))
+    print(f"factory labels are in place in {slug}: {', '.join(FACTORY_LABELS)}")
+
+
+DECISIONS_HEADER = ("# Decisions\n\nQuestions about the product or its implementation and how they were settled. Recorded by the "
+                    "factory; `question-resolver` and the planners treat these as source documents.\n")
+
+
+def cmd_factory_decide(a, cfg):
+    """Append one settled question to .factory/decisions.md (the user's answer, or a recorded assumption)."""
+    d = ROOT / ".factory"
+    d.mkdir(exist_ok=True)
+    f = d / "decisions.md"
+    one = lambda t: " ".join(t.split())
+    entry = (f"\n## {one(a.question)}\n- Kind: {a.kind}\n- Decision: {one(a.answer)}\n- Decided by: {a.by} on {iso()[:10]}\n"
+             + (f"- Why: {one(a.why)}\n" if a.why else "") + (f"- Source: {one(a.source)}\n" if a.source else ""))
+    f.write_text((f.read_text(encoding="utf-8") if f.exists() else DECISIONS_HEADER) + entry, encoding="utf-8")
+    factory_log({"kind": "decision", "question": one(a.question)[:200], "by": a.by, "decision_kind": a.kind})
+    print(f"recorded in {f}")
+
+
+def cmd_factory_issues_create(a, cfg):
+    plan = load_issue_plan(a.file)  # exits with every problem before anything is created
+    order = issue_order(plan)
+    by = {i["key"]: i for i in plan["issues"]}
+    if a.dry_run:
+        print(f"{len(order)} issues would be created, dependencies first:")
+        for k in order:
+            d = ", ".join(by[k].get("depends_on") or []) or "-"
+            print(f"  {k:<28} {by[k]['title'][:60]}  (criteria: {len(by[k]['acceptance'])}, depends on: {d})")
+        for note in plan.get("notes") or []:
+            print(f"note: {note}")
+        return
+    slug = factory_repo(a, cfg)
+    labels_used = {lb for i in plan["issues"] for lb in (i.get("labels") or ["enhancement"])}
+    ensure_labels(slug, labels_used)
+    existing = {x["title"].strip().lower(): x["number"] for x in
+                gh_json("issue", "list", "--repo", slug, "--state", "all", "--limit", "500", "--json", "title,number") or []}
+    numbers: dict[str, int] = {}
+    for key in order:
+        it = by[key]
+        title = it["title"].strip()
+        if title.lower() in existing:
+            numbers[key] = existing[title.lower()]
+            print(f"exists   #{numbers[key]}  {title}")
+            continue
+        args = ["issue", "create", "--repo", slug, "--title", title, "--body-file", "-"]
+        for lb in it.get("labels") or ["enhancement"]:
+            args += ["--label", lb]
+        url = gh(*args, input_text=render_issue_body(it, numbers)).strip().splitlines()[-1]
+        numbers[key] = int(url.rstrip("/").rsplit("/", 1)[-1])
+        factory_log({"kind": "issue_created", "key": key, "number": numbers[key], "repo": slug})
+        print(f"created  #{numbers[key]}  {title}")
+
+
 def cmd_account(a, cfg):
     """Prints '<account>|<config dir>' for the project at the current directory (dir empty = default
     ~/.claude). Prints nothing outside harness projects. Used by scripts/claude-accounts.sh."""
@@ -3574,6 +3746,22 @@ def main(argv=None):
     f.set_defaults(fn=cmd_factory)
     f = fsub.add_parser("cleanup", help="delete stale markers left by crashed launches")
     f.set_defaults(fn=cmd_factory)
+    f = fsub.add_parser("labels", help="create the factory state labels (todo, in-progress, ...) in the repo")
+    f.add_argument("--repo", help="repo name from .claude/harness.toml (default: the only repo)")
+    f.set_defaults(fn=cmd_factory_labels)
+    f = fsub.add_parser("issues-create", help="check a drafted issues.json and create the GitHub issues, dependencies first (--dry-run: check only)")
+    f.add_argument("file")
+    f.add_argument("--repo", help="repo name from .claude/harness.toml (default: the only repo)")
+    f.add_argument("--dry-run", action="store_true")
+    f.set_defaults(fn=cmd_factory_issues_create)
+    f = fsub.add_parser("decide", help="record a settled question in .factory/decisions.md")
+    f.add_argument("--question", required=True)
+    f.add_argument("--answer", required=True)
+    f.add_argument("--by", choices=["user", "assumed"], required=True)
+    f.add_argument("--kind", choices=["product", "implementation"], required=True)
+    f.add_argument("--why", help="the reasoning, especially for an assumption")
+    f.add_argument("--source", help="doc line it comes from, if any")
+    f.set_defaults(fn=cmd_factory_decide)
 
     s = sub.add_parser("doctor", help="check the setup")
     s.add_argument("--ping", action="store_true", help="also send a tiny request to the reviewer API")
