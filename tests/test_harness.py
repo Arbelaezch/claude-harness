@@ -77,7 +77,7 @@ class FactoryGuardTests(unittest.TestCase):
         return m
 
     def ctx(self, agent, cwd=None):
-        return h.factory_context({"cwd": cwd or self.project, "agent_type": agent})
+        return h.factory_context({"cwd": cwd or self.project, "agent_type": agent, "agent_id": "a1" if agent else None})
 
     def bash(self, cmd, agent="harness:ci-fixer", cwd=None):
         return h.check_bash(cmd, CFG, cwd or self.project, subagent=bool(agent), factory=self.ctx(agent, cwd))
@@ -248,8 +248,20 @@ class FactoryGuardTests(unittest.TestCase):
         self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "git push origin feat/x"}))
         self.assertIsNone(self.hook(h.hook_guard_bash, {"command": "gh pr merge 3"}))
 
+    def test_subagent_is_decided_by_agent_id_not_agent_type(self):
+        self.assertFalse(h.is_subagent({"agent_type": "probe"}, None))  # main session started with --agent
+        self.assertFalse(h.is_subagent({}, None))
+        self.assertTrue(h.is_subagent({"agent_type": "harness:scout", "agent_id": "a1"}, None))
+        self.marker()
+        for agent_type in ("probe", "harness:ci-fixer"):  # no agent_id: a main session, so the manager rules apply
+            f = h.factory_context({"cwd": self.project, "agent_type": agent_type})
+            self.assertFalse(h.is_subagent({"agent_type": agent_type}, f))
+        f = h.factory_context({"cwd": self.project, "agent_type": "harness:ci-fixer", "agent_id": "a1"})
+        self.assertTrue(h.is_subagent({}, f))
+
     def hook(self, fn, tool_input, agent=None, cwd=None):
-        payload = json.dumps({"cwd": cwd or self.project, "agent_type": agent, "tool_input": tool_input})
+        payload = json.dumps({"cwd": cwd or self.project, "agent_type": agent, "agent_id": "a1" if agent else None,
+                              "tool_input": tool_input})
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(payload)), contextlib.redirect_stdout(out), \
                 mock.patch.object(h, "log_event", lambda e: None):
