@@ -3383,12 +3383,35 @@ def render_issue_body(it: dict, numbers: dict[str, int]) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def event_line(e: dict) -> str | None:
+    """One short human line for the events that matter to someone watching (None = not shown)."""
+    k, n = e.get("kind"), e.get("issue")
+    return {
+        "issue_picked": lambda: f"picked #{n}: {e.get('reason')}",
+        "harness_started": lambda: f"started #{n}",
+        "harness_finished": lambda: f"#{n} finished: {e.get('outcome')}",
+        "message": lambda: f"{e.get('message_kind')} #{n}: {e.get('text', '')}".rstrip(": "),
+        "usage_pause": lambda: "paused for plan usage" + (
+            f" until {dt.datetime.fromtimestamp(e['resume_at']).strftime('%H:%M')}" if e.get("resume_at") else ""),
+        "usage_resume": lambda: "usage back, resuming",
+        "usage_unknown": lambda: f"usage unreadable ({e.get('count')} in a row)",
+        "orphan_blocked": lambda: f"#{n} was in progress when the factory stopped: blocked",
+        "queued": lambda: f"#{n} queued",
+        "supervisor_started": lambda: "supervisor started",
+        "supervisor_stopped": lambda: f"supervisor stopped ({e.get('why')})",
+    }.get(k, lambda: None)()
+
+
 def factory_log(event: dict) -> None:
-    """Append-only factory log in the target project (section 8)."""
+    """Append-only factory log in the target project (section 8), plus a short line in events.log for watchers."""
     d = ROOT / ".factory"
     d.mkdir(exist_ok=True)
     with open(d / "log.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": iso(), **event}, ensure_ascii=False) + "\n")
+    line = event_line(event)
+    if line:
+        with open(d / "events.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
 
 
 def factory_repo(a, cfg) -> str:
@@ -3539,7 +3562,7 @@ def factory_raise_blocker(cfg, slug, kind, issue, situation, need, options=None,
     notify(text)
     if issue is not None and slug:
         factory_comment(slug, issue, f"```\n{text}\n```")
-    factory_log({"kind": "message", "message_kind": kind, "issue": issue})
+    factory_log({"kind": "message", "message_kind": kind, "issue": issue, "text": " ".join(situation.split())[:140]})
 
 
 def cmd_factory_block(a, cfg):
@@ -3560,6 +3583,174 @@ def cmd_factory_done(a, cfg):
     factory_raise_blocker(cfg, slug, "DONE", a.issue, a.note or f"The PR is open: {a.pr}", "", detail=a.pr)
 
 
+# Supervisor lifecycle: one detached `factory run` per project, found through .factory/supervisor.json.
+def supervisor_info() -> dict | None:
+    """The running supervisor ({pid, started, issues}), or None. A lock whose process is gone is removed."""
+    f = ROOT / ".factory" / "supervisor.json"
+    try:
+        info = json.loads(f.read_text())
+        os.kill(int(info["pid"]), 0)
+        return info
+    except PermissionError:
+        return info
+    except (OSError, ValueError, KeyError, TypeError):
+        f.unlink(missing_ok=True)
+        return None
+
+
+def acquire_supervisor(issues: list[int]) -> None:
+    if supervisor_info():
+        sys.exit("a factory supervisor is already running for this project (see `harness factory status`)")
+    d = ROOT / ".factory"
+    d.mkdir(exist_ok=True)
+    (d / "stop").unlink(missing_ok=True)
+    (d / "supervisor.json").write_text(json.dumps({"pid": os.getpid(), "started": time.time(), "issues": issues}))
+    factory_log({"kind": "supervisor_started"})
+
+
+def release_supervisor() -> None:
+    (ROOT / ".factory" / "supervisor.json").unlink(missing_ok=True)
+    (ROOT / ".factory" / "stop").unlink(missing_ok=True)
+
+
+def cmd_factory_start(a, cfg):
+    """Start the loop detached (survives this session closing, keeps the Mac awake) and return at once."""
+    if supervisor_info():
+        sys.exit("already running; see `harness factory status`")
+    d = ROOT / ".factory"
+    d.mkdir(exist_ok=True)
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--root", str(ROOT), "factory", "run",
+           "--max-issues", str(a.max_issues)]
+    if a.issues:
+        cmd += ["--issues", ",".join(map(str, a.issues))]
+    if a.repo:
+        cmd += ["--repo", a.repo]
+    if shutil.which("caffeinate"):
+        cmd = ["caffeinate", "-i", *cmd]
+    with open(d / "supervisor.log", "a", encoding="utf-8") as out:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True,
+                         cwd=str(ROOT))
+    for _ in range(50):
+        info = supervisor_info()
+        if info:
+            print(f"supervisor running (pid {info['pid']}). Events: {d / 'events.log'}")
+            return
+        time.sleep(0.1)
+    sys.exit(f"the supervisor did not start; see {d / 'supervisor.log'}")
+
+
+def cmd_factory_stop(a, cfg):
+    info = supervisor_info()
+    if not info:
+        print("no supervisor is running")
+        return
+    if a.now:
+        os.kill(int(info["pid"]), signal.SIGTERM)
+        print("stopping now. An issue that was in progress becomes `blocked` the next time the factory starts.")
+    else:
+        (ROOT / ".factory" / "stop").write_text("stop after the current issue\n")
+        print("will stop after the current issue finishes")
+
+
+def run_stage(rd: Path) -> str:
+    """Where a /ship run is, read from the files it has written so far (a guide, not a guarantee)."""
+    if not rd.is_dir():
+        return "starting"
+    names = {p.name for p in rd.iterdir()}
+    rounds = [int(m.group(1)) for n in names if (m := re.fullmatch(r"(?:review|verified|final)-(\d+)\.json", n))]
+    if "summary.md" in names:
+        return "finishing (summary written)"
+    if rounds:
+        n = max(rounds)
+        step = "decided" if f"final-{n}.json" in names else "verified" if f"verified-{n}.json" in names else "reviewed"
+        return f"review round {n} ({step})"
+    if "tasks.json" in names:
+        tasks = read_json(rd / "tasks.json", {})
+        total = len(tasks.get("tasks", tasks)) if isinstance(tasks, (dict, list)) else 0
+        done = len([n for n in names if re.fullmatch(r"notes-.*\.md", n)])
+        return f"implementing ({done}/{total} tasks noted)"
+    if "plan.md" in names:
+        return "planned, about to branch"
+    if any(n.startswith("context-") for n in names):
+        return "scouted, planning"
+    return "scouting"
+
+
+def last_lines(path: Path, n: int) -> list[str]:
+    try:
+        return [x for x in path.read_text(encoding="utf-8", errors="replace").splitlines() if x.strip()][-n:]
+    except OSError:
+        return []
+
+
+def cmd_factory_status(a, cfg):
+    fl, usage = factory_modules()
+    slug = factory_repo(a, cfg)
+    d = ROOT / ".factory"
+    if a.issue:
+        data = gh_json("issue", "view", str(a.issue), "--repo", slug, "--json", "title,labels,comments,url") or {}
+        print(f"#{a.issue} {data.get('title')}  [{', '.join(x['name'] for x in data.get('labels') or [])}]")
+        comments = data.get("comments") or []
+        print(comments[-1]["body"] if comments else "(no comments)")
+        return
+    info = supervisor_info()
+    if info:
+        mins = int((time.time() - info["started"]) / 60)
+        print(f"supervisor: running (pid {info['pid']}, {mins} min)" + ("; stopping after the current issue" if (d / "stop").exists() else ""))
+    else:
+        print("supervisor: not running")
+    fc = cfg.get("factory") or {}
+    u = usage.decide(usage.read_snapshot(max_age=900),
+                     {"five_hour": float(fc.get("max_five_hour", 80)), "seven_day": float(fc.get("max_weekly", 90))})
+    print(f"usage: {u['decision']}" + (f" ({'; '.join(u['reasons'])})" if u["reasons"] else ""))
+
+    issues = gh_json("issue", "list", "--repo", slug, "--state", "all", "--limit", "500",
+                     "--json", "number,title,body,labels,state") or []
+    by_state: dict[str, list[dict]] = {}
+    for i in issues:
+        if str(i.get("state")).upper() == "OPEN":
+            for lb in fl.label_names(i) & set(fl.STATE_LABELS):
+                by_state.setdefault(lb, []).append(i)
+    cur = None
+    for e in read_json_lines(d / "log.jsonl"):
+        if e.get("kind") == "harness_started":
+            cur = e
+        elif e.get("kind") == "harness_finished" and cur and e.get("issue") == cur.get("issue"):
+            cur = None
+    for i in by_state.get("in-progress", []):
+        stage = ""
+        if cur and cur.get("issue") == i["number"]:
+            rid = current_run_id()
+            stage = f" - {run_stage(RUNS_DIR / rid)}" if rid else " - starting"
+        print(f"working on: #{i['number']} {i['title']}{stage}")
+        logs = sorted((d / "sessions").glob(f"issue-{i['number']}-*.log"))
+        for line in (last_lines(logs[-1], 3) if logs else []):
+            print(f"    | {line[:140]}")
+    for label, title in (("blocked", "blocked (answer with the decide command, then queue it again)"),
+                         ("awaiting-merge", "awaiting merge"), ("todo", "queued")):
+        rows = by_state.get(label, [])
+        if rows:
+            print(f"{title}: " + "; ".join(f"#{i['number']} {i['title'][:50]}" for i in rows))
+    pool = fl.compute_pool(issues)
+    if pool:
+        print("could run now: " + ", ".join(f"#{p['number']}" for p in pool))
+    events = last_lines(d / "events.log", a.events)
+    if events:
+        print("recent events:")
+        for line in events:
+            print(f"  {line}")
+
+
+def read_json_lines(path: Path) -> list[dict]:
+    out = []
+    for line in last_lines(path, 100000):
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass
+    return out
+
+
 def cmd_factory_run(a, cfg):
     fl, usage = factory_modules()
     if a.merge != "manual":
@@ -3575,10 +3766,21 @@ def cmd_factory_run(a, cfg):
         pool = fl.compute_pool(fetch())
         print(f"{len(pool)} issue(s) could run now: " + (", ".join(f"#{p['number']} {p['title']}" for p in pool) or "none"))
         return
-    ensure_labels(slug, set(FACTORY_LABELS))
-    for n in a.issues or []:
-        set_issue_state(slug, n, "todo")
-        factory_log({"kind": "queued", "issue": n})
+    acquire_supervisor(a.issues or [])
+    why = "error"
+    try:
+        ensure_labels(slug, set(FACTORY_LABELS))
+        for n in a.issues or []:
+            set_issue_state(slug, n, "todo")
+            factory_log({"kind": "queued", "issue": n})
+        summary = run_factory_loop(a, cfg, fl, usage, fc, slug, fetch)
+        why = summary["stopped"] or "pool empty"
+    finally:
+        release_supervisor()
+        factory_log({"kind": "supervisor_stopped", "why": why})
+
+
+def run_factory_loop(a, cfg, fl, usage, fc, slug, fetch):
 
     sessions = ROOT / ".factory" / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
@@ -3601,11 +3803,12 @@ def cmd_factory_run(a, cfg):
         set_state=lambda n, st: set_issue_state(slug, n, st), run_issue=run_issue,
         fetch_labels=lambda n: issue_labels(slug, n),
         raise_blocker=lambda text, issue, need: factory_raise_blocker(cfg, slug, "BLOCKER", issue, text, need),
-        log=factory_log, max_issues=a.max_issues)
+        log=factory_log, max_issues=a.max_issues, should_stop=lambda: (ROOT / ".factory" / "stop").exists())
     for r in summary["results"]:
         print(f"#{r['issue']}: {r['outcome']}")
     print(f"{len(summary['results'])} issue(s) run" + (f"; stopped: {summary['stopped']}" if summary["stopped"] else ""))
     factory_log({"kind": "run_finished", **summary})
+    return summary
 
 
 def cmd_account(a, cfg):
@@ -3900,6 +4103,19 @@ def main(argv=None):
     f.add_argument("--dry-run", action="store_true", help="only show what could run")
     f.add_argument("--repo")
     f.set_defaults(fn=cmd_factory_run)
+    f = fsub.add_parser("start", help="start the factory loop detached and return (what /factory uses)")
+    f.add_argument("--issues", type=lambda t: [int(x) for x in t.split(",") if x])
+    f.add_argument("--max-issues", type=int, default=20)
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_start)
+    f = fsub.add_parser("stop", help="stop the detached loop after the current issue (--now: immediately)")
+    f.add_argument("--now", action="store_true")
+    f.set_defaults(fn=cmd_factory_stop)
+    f = fsub.add_parser("status", help="short picture of the factory: supervisor, current issue and stage, queue, blocked")
+    f.add_argument("--issue", type=int, help="show one issue's latest message (e.g. the question a blocked issue is waiting on)")
+    f.add_argument("--events", type=int, default=8, help="how many recent events to show")
+    f.add_argument("--repo")
+    f.set_defaults(fn=cmd_factory_status)
     f = fsub.add_parser("block", help="(used by factory sessions) label an issue blocked and tell the user")
     f.add_argument("issue", type=int)
     f.add_argument("--kind", choices=["BLOCKER", "QUESTION"], default="BLOCKER", type=str.upper)

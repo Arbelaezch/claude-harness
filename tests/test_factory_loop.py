@@ -250,5 +250,121 @@ class HarnessWiringTests(unittest.TestCase):
             h.cmd_factory_run(mock.Mock(merge="auto"), {})
 
 
+class FrontDoorTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patcher = mock.patch.object(h, "ROOT", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_graceful_stop_is_checked_between_issues(self):
+        ran = []
+        stop = {"now": False}
+
+        def run_issue(n):
+            ran.append(n)
+            stop["now"] = True
+            return 0
+
+        result = fl.run_loop(gate=lambda: "go", fetch_issues=lambda: [issue(1), issue(2)],
+                             select=lambda pool: (pool[0]["number"], "x"), set_state=lambda n, s: None,
+                             run_issue=run_issue, fetch_labels=lambda n: {"awaiting-merge"},
+                             raise_blocker=lambda *a: None, log=lambda e: None, should_stop=lambda: stop["now"])
+        self.assertEqual((ran, result["stopped"]), ([1], "stop requested"))
+
+    def test_events_log_gets_short_lines_for_the_events_that_matter(self):
+        h.factory_log({"kind": "issue_picked", "issue": 4, "reason": "unblocks 2"})
+        h.factory_log({"kind": "message", "message_kind": "BLOCKER", "issue": 4, "text": "Gates keep failing."})
+        h.factory_log({"kind": "usage_pause", "resume_at": None})
+        h.factory_log({"kind": "something_internal"})
+        lines = (self.root / ".factory" / "events.log").read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].endswith("picked #4: unblocks 2"))
+        self.assertTrue(lines[1].endswith("BLOCKER #4: Gates keep failing."))
+        self.assertEqual(len((self.root / ".factory" / "log.jsonl").read_text().splitlines()), 4)
+
+    def test_supervisor_lock(self):
+        import json
+        import os
+        self.assertIsNone(h.supervisor_info())
+        h.acquire_supervisor([3])
+        self.assertEqual(h.supervisor_info()["pid"], os.getpid())
+        with self.assertRaises(SystemExit):
+            h.acquire_supervisor([])
+        h.release_supervisor()
+        self.assertIsNone(h.supervisor_info())
+        (self.root / ".factory" / "supervisor.json").write_text(json.dumps({"pid": 2 ** 22 + 99, "started": 0, "issues": []}))
+        self.assertIsNone(h.supervisor_info())  # a dead supervisor's lock is cleaned up
+        self.assertFalse((self.root / ".factory" / "supervisor.json").exists())
+
+    def test_stop_is_graceful_by_default_and_signals_with_now(self):
+        import os
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            h.cmd_factory_stop(mock.Mock(now=False), {})
+            self.assertIn("no supervisor", out.getvalue())
+            h.acquire_supervisor([])
+            h.cmd_factory_stop(mock.Mock(now=False), {})
+            self.assertTrue((self.root / ".factory" / "stop").exists())
+            with mock.patch.object(h.os, "kill") as kill:
+                h.cmd_factory_stop(mock.Mock(now=True), {})
+        kill.assert_any_call(os.getpid(), h.signal.SIGTERM)
+        h.release_supervisor()
+        self.assertFalse((self.root / ".factory" / "stop").exists())
+
+    def test_run_stage_reads_the_run_directory(self):
+        import json
+        rd = self.root / "run"
+        self.assertEqual(h.run_stage(rd), "starting")
+        rd.mkdir()
+        self.assertEqual(h.run_stage(rd), "scouting")
+        (rd / "context-app.md").write_text("x")
+        self.assertEqual(h.run_stage(rd), "scouted, planning")
+        (rd / "plan.md").write_text("x")
+        (rd / "tasks.json").write_text(json.dumps({"tasks": [{}, {}, {}]}))
+        (rd / "notes-T1.md").write_text("x")
+        self.assertEqual(h.run_stage(rd), "implementing (1/3 tasks noted)")
+        (rd / "review-1.json").write_text("{}")
+        self.assertEqual(h.run_stage(rd), "review round 1 (reviewed)")
+        (rd / "verified-1.json").write_text("{}")
+        (rd / "final-1.json").write_text("{}")
+        self.assertEqual(h.run_stage(rd), "review round 1 (decided)")
+        (rd / "summary.md").write_text("x")
+        self.assertEqual(h.run_stage(rd), "finishing (summary written)")
+
+    def test_status_summarises_supervisor_queue_blocked_and_events(self):
+        h.acquire_supervisor([])
+        h.factory_log({"kind": "harness_started", "issue": 2})
+        h.factory_log({"kind": "issue_picked", "issue": 2, "reason": "only candidate"})
+        sessions = self.root / ".factory" / "sessions"
+        sessions.mkdir()
+        (sessions / "issue-2-1.log").write_text("line one\nline two\n")
+        issues = [issue(2, labels=("in-progress",), title="Build it"), issue(3, labels=("blocked",), title="Stuck one"),
+                  issue(4, labels=("awaiting-merge",)), issue(5, labels=("todo",)), issue(6, labels=("todo",), body="Depends on #5")]
+        usage = types_ns(decide=lambda r, l: {"decision": "go", "reasons": []}, read_snapshot=lambda max_age=0: None)
+        with mock.patch.object(h, "factory_modules", lambda: (fl, usage)), \
+                mock.patch.object(h, "factory_repo", lambda a, c: "o/r"), mock.patch.object(h, "gh_json", lambda *a: issues), \
+                mock.patch.object(h, "current_run_id", lambda: None), contextlib.redirect_stdout(io.StringIO()) as out:
+            h.cmd_factory_status(mock.Mock(issue=None, events=5), {})
+        text = out.getvalue()
+        h.release_supervisor()
+        self.assertIn("supervisor: running", text)
+        self.assertIn("usage: go", text)
+        self.assertIn("working on: #2 Build it - starting", text)
+        self.assertIn("| line two", text)
+        self.assertIn("blocked", text)
+        self.assertIn("#3 Stuck one", text)
+        self.assertIn("awaiting merge: #4", text)
+        self.assertIn("could run now: #5", text)
+        self.assertIn("picked #2: only candidate", text)
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
 if __name__ == "__main__":
     unittest.main()
