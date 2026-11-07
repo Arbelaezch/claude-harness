@@ -806,9 +806,146 @@ SUBAGENT_BLOCKED = {
 }
 
 
-def split_segments(command: str) -> list[list[str]]:
-    segs = []
-    for part in re.split(r"&&|\|\||;|\||\n|\$\(|`|\(|\)", command):
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+WRAPPERS = ("sudo", "command", "exec", "env", "time", "nohup")
+_HEREDOC_RE = re.compile(r"<<(-?)\s*(?:'([^']*)'|\"([^\"]*)\"|(\\?)(\w+))")
+_SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+
+def _balanced(text: str, i: int) -> tuple[str, int]:
+    """Text of a `$( ... )` whose body starts at i, and the index after its `)`."""
+    depth, quote, j = 1, None, i
+    while j < len(text):
+        c = text[j]
+        if quote:
+            if c == "\\" and quote == '"':
+                j += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[i:j], j + 1
+        j += 1
+    raise ValueError("unbalanced $(")
+
+
+def _scan(command: str) -> tuple[list[str], list[str]]:
+    """Split a shell command into segment texts on operators outside quotes and heredoc bodies. Also returns the
+    bodies of command substitutions ($(...), backticks), which run even inside double quotes or an unquoted heredoc.
+    Raises ValueError when quoting is unbalanced."""
+    segs: list[str] = []
+    subs: list[str] = []
+    buf: list[str] = []
+    pending: list[tuple[bool, bool, str]] = []  # heredocs opened on the current line: (strip tabs, literal, delimiter)
+    quote, i, n = None, 0, len(command)
+
+    def flush():
+        text = "".join(buf).strip()
+        buf.clear()
+        if text:
+            segs.append(text)
+
+    while i < n:
+        c = command[i]
+        if quote == "'":
+            buf.append(c)
+            quote = None if c == "'" else quote
+            i += 1
+        elif quote == '"':
+            if c == "\\" and i + 1 < n:
+                buf.append(command[i:i + 2])
+                i += 2
+            elif c == '"':
+                buf.append(c)
+                quote = None
+                i += 1
+            elif command.startswith("$(", i):
+                inner, j = _balanced(command, i + 2)
+                subs.append(inner)
+                buf.append(command[i:j])
+                i = j
+            elif c == "`":
+                j = command.find("`", i + 1)
+                if j < 0:
+                    raise ValueError("unbalanced backtick")
+                subs.append(command[i + 1:j])
+                buf.append(command[i:j + 1])
+                i = j + 1
+            else:
+                buf.append(c)
+                i += 1
+        elif c == "\\" and i + 1 < n:
+            buf.append(command[i:i + 2])
+            i += 2
+        elif c in "'\"":
+            quote = c
+            buf.append(c)
+            i += 1
+        elif command.startswith("<<", i) and not command.startswith("<<<", i) and _HEREDOC_RE.match(command, i):
+            m = _HEREDOC_RE.match(command, i)
+            pending.append((m.group(1) == "-", m.group(2) is not None or m.group(3) is not None or bool(m.group(4)),
+                            m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)))
+            buf.append(m.group(0))
+            i = m.end()
+        elif c == "\n":
+            flush()
+            i += 1
+            for strip_tabs, literal, delim in pending:
+                body = []
+                while i < n:
+                    e = command.find("\n", i)
+                    e = n if e < 0 else e
+                    line = command[i:e]
+                    i = e + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delim:
+                        break
+                    body.append(line)
+                if not literal:
+                    for m in _SUBST_RE.finditer("\n".join(body)):
+                        subs.append(m.group(1) or m.group(2) or "")
+            pending.clear()
+        elif command.startswith("$(", i):
+            flush()
+            inner, i = _balanced(command, i + 2)
+            subs.append(inner)
+        elif c == "`":
+            flush()
+            j = command.find("`", i + 1)
+            if j < 0:
+                raise ValueError("unbalanced backtick")
+            subs.append(command[i + 1:j])
+            i = j + 1
+        elif command.startswith(("&&", "||"), i):
+            flush()
+            i += 2
+        elif c in ";|&()":
+            flush()
+            i += 1
+        else:
+            buf.append(c)
+            i += 1
+    if quote:
+        raise ValueError("unbalanced quote")
+    flush()
+    return segs, subs
+
+
+def parse_command(command: str, depth: int = 0) -> tuple[list[list[str]], list[str]]:
+    """(argv list for every command that would run, env-assignment tokens). Quoted text and heredoc bodies are data,
+    not commands; `bash -c '...'`, `eval` and command substitutions are parsed too. Fails closed: if the quoting
+    can't be parsed it falls back to splitting on every operator, so nothing is hidden."""
+    try:
+        texts, subs = _scan(command)
+    except ValueError:
+        texts, subs = [p for p in re.split(r"&&|\|\||;|\||\n|\$\(|`|\(|\)", command)], []
+    segs: list[list[str]] = []
+    env: list[str] = []
+    for part in texts:
         part = part.strip()
         if not part:
             continue
@@ -816,11 +953,37 @@ def split_segments(command: str) -> list[list[str]]:
             toks = shlex.split(part, posix=True)
         except ValueError:
             toks = part.split()
-        while toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]) or toks[0] in ("sudo", "command", "exec", "env", "time", "nohup")):
+        while toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]) or toks[0] in WRAPPERS):
+            if "=" in toks[0]:
+                env.append(toks[0])
             toks = toks[1:]
-        if toks:
-            segs.append(toks)
-    return segs
+        if not toks:
+            continue
+        if toks[0] == "export":
+            env.extend(toks[1:])
+        segs.append(toks)
+        inner = None
+        if Path(toks[0]).name in SHELLS and depth < 5:
+            flag = next((k for k, t in enumerate(toks[1:], 1) if re.match(r"^-[a-z]*c[a-z]*$", t)), None)
+            inner = toks[flag + 1] if flag and flag + 1 < len(toks) else None
+        elif toks[0] == "eval" and depth < 5:
+            inner = " ".join(toks[1:])
+        subs = subs + ([inner] if inner else [])
+    if depth < 5:
+        for sub in subs:
+            more_segs, more_env = parse_command(sub, depth + 1)
+            segs.extend(more_segs)
+            env.extend(more_env)
+    return segs, env
+
+
+def split_segments(command: str) -> list[list[str]]:
+    return parse_command(command)[0]
+
+
+def env_overrides(command: str) -> str:
+    """The env assignments the command sets (`VAR=x cmd`, `env VAR=x`, `export VAR=x`), as one string."""
+    return " ".join(parse_command(command)[1])
 
 
 def git_parts(toks: list[str]) -> tuple[str | None, list[str], str | None]:
@@ -1022,7 +1185,7 @@ def write_accounts(cfg: dict) -> set[str]:
 def github_account_state(command: str, cfg: dict) -> tuple[str | None, str]:
     """('writer' | 'other' | None, why). None means the identity can't be trusted (token/host override or
     unknown login), so callers fail closed."""
-    if GH_OVERRIDE_RE.search(command):
+    if GH_OVERRIDE_RE.search(env_overrides(command)):
         return None, "don't override the GitHub token or host; it must run as your active gh account"
     allowed = write_accounts(cfg)
     pinned = ((cfg.get("accounts") or {}).get("github") or "").strip()
@@ -1058,7 +1221,7 @@ def writer_denial(command: str, cfg: dict, what: str) -> str | None:
 
 def any_account_denial(command: str, cfg: dict, what: str) -> str | None:
     """Creating PRs/issues works on any account (when the user asks), but never with a token/host override."""
-    if GH_OVERRIDE_RE.search(command):
+    if GH_OVERRIDE_RE.search(env_overrides(command)):
         return f"`{what}` is blocked: don't override the GitHub token or host; it must run as your active gh account."
     return None
 

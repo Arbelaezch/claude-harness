@@ -309,5 +309,45 @@ class FactoryGuardTests(unittest.TestCase):
             self.assertFalse(denied(h.hook_guard_bash, "git push", None))  # the main session is not a factory subagent
 
 
+class ShellParsingTests(unittest.TestCase):
+    """Text that only mentions a command is data; things that run are still caught (issues #3 and #18)."""
+
+    def cmds(self, command):
+        return [t[0] for t in h.split_segments(command)]
+
+    def guard(self, command, **kw):
+        with mock.patch.object(h, "github_account_state", lambda c, cfg: ("writer", "stub")), \
+                mock.patch.object(h, "current_branch", lambda p: "feat/x"):
+            return h.check_bash(command, CFG, "/p", **kw), h.check_github_global(command, CFG, "/p", **kw)
+
+    def test_quoted_operators_do_not_split(self):
+        self.assertEqual(self.cmds("grep -E 'git push|git add' f"), ["grep"])
+        self.assertEqual(self.cmds('echo "a; git push && b"'), ["echo"])
+        self.assertEqual(self.cmds("echo a\\; git push"), ["echo"])
+
+    def test_heredoc_bodies_are_data(self):
+        for cmd in ("cat > f.md <<'EOF'\nuse gh auth switch and GH_TOKEN=x\ngit push origin main\nEOF\nls",
+                    "cat <<-EOF\n\tgit add .\n\tEOF\nls", 'cat <<"X"\ngit push origin main\nX'):
+            self.assertEqual(self.guard(cmd), (None, None), cmd)
+        self.assertEqual(self.cmds("cat <<EOF && ls\nbody\nEOF"), ["cat", "ls"])
+
+    def test_things_that_run_are_still_checked(self):
+        for cmd in ("echo ok && git push origin main", 'echo "$(git push origin main)"', "echo `git push origin main`",
+                    'bash -c "git push origin main"', "sh -lc 'git push --force origin x'",
+                    "eval 'git push origin main'", "cat <<EOF\n$(git push origin main)\nEOF",
+                    "echo 'unterminated && git push origin main", "(git push origin main)", "git push origin main &"):
+            self.assertIn("git", " ".join(sum(h.split_segments(cmd), [])), cmd)
+            self.assertTrue(any(self.guard(cmd)), cmd)
+        self.assertTrue(any(self.guard("gh auth switch")))
+        self.assertTrue(any(self.guard("echo x; gh auth switch -u other")))
+
+    def test_token_overrides_only_count_as_env_assignments(self):
+        self.assertEqual(self.guard("echo 'GH_TOKEN is documented here'"), (None, None))
+        self.assertEqual(self.guard("cat <<'EOF'\nGH_TOKEN=x gh pr create\nEOF"), (None, None))
+        for cmd in ("GH_TOKEN=x gh pr create", "export GH_HOST=h; gh pr create", "env GITHUB_TOKEN=x gh pr create",
+                    'bash -c "GH_TOKEN=x gh pr create"'):
+            self.assertTrue(any(self.guard(cmd)), cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
